@@ -1,8 +1,16 @@
 [package]
+edition = "2021"
 name = "noisy-shuttle"
 version = "0.1.0"
-edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+hex-literal = "0.3"
+snow = "0.9"
+rustls = { version = "0.20", features = ["dangerous_configuration"] } # only types are used
+tokio = { version = "1.20", features = ["full"] }
+tokio-rustls = "0.23"
+
+[patch.crates-io]
+rustls = { git = "https://github.com/gowee/rustls-mod.git" }
