@@ -24,8 +24,8 @@ mod utils;
 use crate::utils::{u16_from_slice, NoCertificateVerification};
 
 const LISTEN_ADDR: &'static str = "127.0.0.1:44443";
-const CAMOUFLAGE: &'static str = "www.aliexpress.com";
-const CAMOUFLAGE_HOST: &'static str = "59.82.60.28:443";
+const CAMOUFLAGE_DOMAIN: &'static str = "www.aliexpress.com";
+const CAMOUFLAGE_ADDR: &'static str = "59.82.60.28:443";
 const PATTERN: &'static str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
 // const KEY: &'static str = "Winnie the P00h";
 const KEY: &[u8] = b"i don't care for fidget spinners";
@@ -63,12 +63,13 @@ async fn run_client() -> Result<(), Box<dyn Error>> {
     let connector = TlsConnector::from(Arc::new(config.clone()));
     let client = rustls::ClientConnection::new_with_random_and_session_id(
         Arc::new(config.clone()),
-        CAMOUFLAGE.try_into().unwrap(),
+        CAMOUFLAGE_DOMAIN.try_into().unwrap(),
         <[u8; 32]>::try_from(&buf[0..32]).unwrap().into(),
         (&buf[32..64]).into(),
     )?;
-    let connect =
-        connector.connect_with(CAMOUFLAGE.try_into().unwrap(), sock, |conn| *conn = client);
+    let connect = connector.connect_with(CAMOUFLAGE_DOMAIN.try_into().unwrap(), sock, |conn| {
+        *conn = client
+    });
 
     let (mut sock, _tlsconn) = connect.await.unwrap().into_inner();
 
@@ -118,15 +119,22 @@ async fn run_server() -> Result<(), Box<dyn Error>> {
         e_psk[..32].copy_from_slice(&buf[buf.len() - 65..buf.len() - 33]);
         e_psk[32..].copy_from_slice(&buf[buf.len() - 32..]);
         println!("S: e, psk {:x?}", &e_psk[..48]);
-        responder.read_message(&e_psk[..48], &mut []).unwrap(); // TODO: fallback to relay at this point
+        let mut outbound =
+            TcpStream::connect(CAMOUFLAGE_ADDR.parse::<SocketAddr>().unwrap()).await?;
+        if responder.read_message(&e_psk[..48], &mut []).is_err() {
+            // fallback to naive relay
+            outbound.write_all(&buf).await?;
+            tokio::io::copy_bidirectional(&mut inbound, &mut outbound)
+                .await
+                .map(|_| ())?;
+            continue;
+        }
 
         let msglen = u16_from_slice(&buf[3..5]) as usize;
         let mut msgbuf = vec![0; msglen - (4 + 2 + 32 + 1 + 32)];
         inbound.read_exact(&mut msgbuf).await?;
 
         // https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L88
-        let mut outbound =
-            TcpStream::connect(CAMOUFLAGE_HOST.parse::<SocketAddr>().unwrap()).await?;
         // TODO: write once
         outbound.write_all(&buf).await?;
         outbound.write_all(&msgbuf).await?;
@@ -192,6 +200,7 @@ async fn copy_until_handshake_finished<'a>(
     mut read_half: ReadHalf<'a>,
     mut write_half: WriteHalf<'a>,
 ) -> Result<(), Box<dyn Error>> {
+    //  Adapted from: https://github.com/ihciah/shadow-tls/blob/2bbdc26cff1120ba9c8eded39ad743c4c4f687c4/src/protocol.rs#L138
     const HANDSHAKE: u8 = 0x16;
     const CHANGE_CIPHER_SPEC: u8 = 0x14;
     // header_buf is used to read handshake frame header, will be a fixed size buffer.
@@ -233,3 +242,49 @@ async fn copy_until_handshake_finished<'a>(
     }
     Ok(())
 }
+
+// async fn copy_until_eof<'a>(
+//     mut read_half: ReadHalf<'a>,
+//     mut write_half: WriteHalf<'a>,
+// ) -> Result<(), Box<dyn Error>> {
+//     const HANDSHAKE: u8 = 0x16;
+//     const CHANGE_CIPHER_SPEC: u8 = 0x14;
+//     // header_buf is used to read handshake frame header, will be a fixed size buffer.
+//     let mut header_buf = [0u8; 5];
+//     // data_buf is used to read and write data, and can be expanded.
+//     let mut data_buf = vec![0u8; 2048];
+//     let mut has_seen_change_cipher_spec = false;
+
+//     loop {
+//         // read exact 5 bytes
+//         read_half.read_exact(&mut header_buf).await?;
+
+//         // parse length
+//         let data_size = u16_from_slice(&header_buf[3..5]) as usize;
+
+//         // copy header and that much data
+//         write_half.write_all(&mut header_buf).await?;
+//         if data_size > data_buf.len() {
+//             data_buf.resize(data_size, 0);
+//         }
+//         dbg!(data_size, data_buf.len());
+//         read_half.read_exact(&mut data_buf[0..data_size]).await?;
+//         write_half.write_all(&data_buf[0..data_size]).await?;
+
+//         // check header type
+//         // let header_ref = header_buf.insert(header_buf);
+//         if header_buf[0] != HANDSHAKE {
+//             if header_buf[0] != CHANGE_CIPHER_SPEC {
+//                 panic!("invalid header");
+//             }
+//             if !has_seen_change_cipher_spec {
+//                 has_seen_change_cipher_spec = true;
+//                 continue;
+//             }
+//         }
+//         if has_seen_change_cipher_spec {
+//             break;
+//         }
+//     }
+//     Ok(())
+// }
