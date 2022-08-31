@@ -8,13 +8,14 @@ version = "0.1.0"
 [dependencies]
 hex-literal = "0.3"
 snow = "0.9"
-rustls = { version = "0.20", features = ["dangerous_configuration"] } # only types are used
+rustls = { version = "0.20", features = ["dangerous_configuration"] }
 tokio = { version = "1.20", features = ["full"] }
 tokio-rustls = "0.23"
-lazy_static = "1.4.0"
-anyhow = "1.0.62"
-structopt = "0.3.26"
+lazy_static = "1.4"
+anyhow = "1.0"
+structopt = "0.3"
 clap = "3.2.18"
+futures = "0.3"
 
 [patch.crates-io]
 rustls = { git = "https://github.com/gowee/rustls-mod.git" }

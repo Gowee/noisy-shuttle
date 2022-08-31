@@ -1,12 +1,14 @@
 use anyhow::Result;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::macros::support::poll_fn;
 // use tokio::net::unix::SocketAddr;
 use tokio::net::{
     tcp::{ReadHalf, WriteHalf},
     TcpListener, TcpStream,
 };
 use tokio::time::{sleep, Duration};
+// use futures::future::poll_fn;
 
 // use futures::FutureExt;
 use std::net::SocketAddr;
@@ -25,26 +27,26 @@ pub async fn run_server(opt: Opt) -> Result<()> {
     assert!(opt.role.is_server());
     let listener = TcpListener::bind(LISTEN_ADDR).await?;
 
-    while let Ok((mut inbound, client_addr)) = listener.accept().await {
+    while let Ok((inbound, client_addr)) = listener.accept().await {
         tokio::spawn(handle_connection(inbound, client_addr));
     }
     Ok(())
 }
 
 pub async fn handle_connection(mut inbound: TcpStream, client_addr: SocketAddr) -> Result<()> {
+    dbg!(&client_addr);
     let mut responder = snow::Builder::new(NOISE_PARAMS.clone())
         .psk(0, KEY)
         .build_responder()?;
-    // Ref: https://tls12.xargs.org/
     let mut buf = [0u8; 5 + 4 + 2 + 32 + 1 + 32];
     inbound.read_exact(&mut buf).await?;
     let mut e_psk = [0u8; 64];
     e_psk[..32].copy_from_slice(&buf[buf.len() - 65..buf.len() - 33]);
     e_psk[32..].copy_from_slice(&buf[buf.len() - 32..]);
-
+    println!("S: e, psk {:x?}", &e_psk[..48]);
     let mut outbound = TcpStream::connect(CAMOUFLAGE_ADDR.parse::<SocketAddr>().unwrap()).await?;
     if responder.read_message(&e_psk[..48], &mut []).is_err() {
-        // if noise auth failed, fallback to simple relay
+        // fallback to naive relay
         outbound.write_all(&buf).await?;
         tokio::io::copy_bidirectional(&mut inbound, &mut outbound)
             .await
@@ -75,10 +77,18 @@ pub async fn handle_connection(mut inbound: TcpStream, client_addr: SocketAddr) 
         let _ = outbound.shutdown().await;
     });
 
+    // force flush TCP
+    if !inbound.nodelay()? {
+        inbound.set_nodelay(true)?;
+        inbound.write_all(&[]).await?;
+        inbound.set_nodelay(false)?;
+    }
+
     let mut buf = [0u8; 1024];
+    // Noise: <- e, ee
     let len = responder.write_message(&[], &mut buf)?;
-    dbg!(len);
     println!("S: e, ee {:x?}", &buf[..len]);
+    assert_eq!(len, 48);
     inbound.write_all(&buf[0..len]).await?;
 
     let mut responder = responder.into_transport_mode()?;
@@ -94,17 +104,7 @@ pub async fn handle_connection(mut inbound: TcpStream, client_addr: SocketAddr) 
         .unwrap();
     println!("{}", String::from_utf8_lossy(&buf[..len]));
 
-    // loop {
-    //     let len = sock.read(&mut buf).await?;
-    //     if len == 0 {
-    //         break;
-    //     }
-    //     dbg!(&buf[..len], String::from_utf8_lossy(&buf[..len]));
-    // }
     Ok(())
-
-    // responder.write_message(b"pong", &mut buf).unwrap();
-    // inbound.write_all(&buf).await?;
 }
 
 async fn copy_until_handshake_finished<'a>(
@@ -132,7 +132,6 @@ async fn copy_until_handshake_finished<'a>(
         if data_size > data_buf.len() {
             data_buf.resize(data_size, 0);
         }
-        dbg!(data_size, data_buf.len());
         read_half.read_exact(&mut data_buf[0..data_size]).await?;
         write_half.write_all(&data_buf[0..data_size]).await?;
 

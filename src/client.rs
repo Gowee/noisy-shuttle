@@ -19,6 +19,11 @@ const CAMOUFLAGE_ADDR: &'static str = "59.82.60.28:443";
 // const KEY: &'static str = "Winnie the P00h";
 const KEY: &[u8] = b"i don't care for fidget spinners";
 
+// pub struct Client {
+//     server_addr: SocketAddr,
+//     noise_params:
+// }
+
 pub async fn run_client(opt: Opt) -> Result<()> {
     assert!(opt.role.is_client());
     let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
@@ -27,6 +32,7 @@ pub async fn run_client(opt: Opt) -> Result<()> {
     let mut buf = [0u8; 48];
     // Noise: -> psk, e
     assert_eq!(initiator.write_message(&[], &mut buf).unwrap(), 48);
+    println!("C: e, psk {:x?}", &buf);
 
     let sock = TcpStream::connect(opt.remote_addr).await?;
 
@@ -46,14 +52,29 @@ pub async fn run_client(opt: Opt) -> Result<()> {
     let connect = connector.connect_with(CAMOUFLAGE_DOMAIN.try_into().unwrap(), sock, |conn| {
         *conn = tlsconn
     });
+    dbg!("a");
     // let tokio-rustls to make real & full handshake
     let (mut sock, _tlsconn) = connect.await.unwrap().into_inner();
-
+    dbg!("b");
     let mut buf = [0u8; 48];
     sock.read_exact(&mut buf).await?;
+    println!("C: e, ee {:x?}", &buf);
     // Noise: <- e, ee
     initiator.read_message(&buf, &mut []).unwrap();
     let mut initiator = initiator.into_transport_mode()?;
 
+    let mut buf = [0u8; 1024];
+    let len = initiator.write_message(b"ping", &mut buf).unwrap();
+    println!("C ping hex: {:x?}", &buf[..len]);
+    sock.write_all(&buf[0..len]).await?;
+    loop {
+        let len = sock.read(&mut buf).await?;
+        if len == 0 {
+            break;
+        }
+        let len = initiator.read_message(&buf.clone()[0..len], &mut buf)?;
+        println!("C pong hex: {:x?}", &buf[..len]);
+        println!("{}", String::from_utf8_lossy(&buf[..len]));
+    }
     Ok(())
 }
