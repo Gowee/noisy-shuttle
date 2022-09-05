@@ -17,6 +17,7 @@ structopt = "0.3"
 clap = "3.2.18"
 futures = "0.3"
 rand = "0.8.5"
+blake2 = "0.10.4"
 
 [patch.crates-io]
 rustls = { git = "https://github.com/gowee/rustls-mod.git" }

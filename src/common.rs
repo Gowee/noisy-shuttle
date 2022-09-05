@@ -1,3 +1,4 @@
+use blake2::{Blake2s256, Digest};
 use lazy_static::lazy_static;
 use rustls::internal::msgs::deframer::MessageDeframer;
 use snow::{params::NoiseParams, TransportState};
@@ -20,6 +21,8 @@ lazy_static! {
 }
 
 const MAXIMUM_MESSAGE_LENGTH: usize = u16::MAX as usize;
+pub const PSKLEN: usize = 32; // snow::constants::PSKLEN;
+const SALT: &[u8] = b"the secure tunnel under snow";
 
 pub struct SnowyStream {
     pub(crate) socket: TcpStream,
@@ -277,4 +280,11 @@ impl SnowyState {
     pub fn readable(&self) -> bool {
         !matches!(*self, SnowyState::ReadShutdown | SnowyState::FullyShutdown)
     }
+}
+
+pub fn derive_psk(key: &[u8]) -> [u8; PSKLEN] {
+    let mut h = Blake2s256::new();
+    h.update(SALT);
+    h.update(key);
+    h.finalize().into()
 }

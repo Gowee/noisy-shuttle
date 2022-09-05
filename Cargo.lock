@@ -471,6 +471,7 @@ name = "noisy-shuttle"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake2",
  "clap 3.2.19",
  "futures",
  "hex-literal",

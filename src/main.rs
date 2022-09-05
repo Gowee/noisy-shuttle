@@ -3,23 +3,109 @@
 use anyhow::Result;
 use structopt::StructOpt;
 
+use tokio::io::AsyncWriteExt;
+use tokio::net::lookup_host;
+use tokio::net::{TcpListener, TcpStream};
+
+use std::io;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use crate::client::Client;
+use crate::common::derive_psk;
+use crate::opt::{CltOpt, Opt, SvrOpt};
+use crate::server::{Accept, Server};
+
 mod client;
 mod common;
 mod opt;
 mod server;
 mod utils;
 
-use crate::client::run_client;
-use crate::opt::Opt;
-use crate::server::run_server;
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let opt = Opt::from_args();
-    if opt.role.is_client() {
-        run_client(opt).await?;
-    } else {
-        run_server(opt).await?;
+    match opt {
+        Opt::Client(opt) => run_client(opt).await?,
+        Opt::Server(opt) => run_server(opt).await?,
+    }
+    Ok(())
+}
+
+pub async fn run_server(opt: SvrOpt) -> Result<()> {
+    let camouflage_addr = lookup_host(&opt.camouflage_addr)
+        .await?
+        .next()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "could not resolve to any address",
+            )
+        })?;
+    println!(
+        "remote: {}, camouflage: {}",
+        opt.remote_addr, camouflage_addr
+    );
+    let server = Arc::new(Server {
+        key: derive_psk(opt.key.as_bytes()),
+        camouflage_addr,
+    });
+    let opt = Arc::new(opt);
+    let listener = TcpListener::bind(opt.listen_addr).await?;
+    while let Ok((inbound, client_addr)) = listener.accept().await {
+        let server = server.clone();
+        let opt = opt.clone();
+        tokio::spawn(handle_server_connection(server, inbound, client_addr, opt));
+    }
+    Ok(())
+}
+
+pub async fn handle_server_connection(
+    server: Arc<Server>,
+    inbound: TcpStream,
+    client_addr: SocketAddr,
+    opt: Arc<SvrOpt>,
+) -> io::Result<()> {
+    println!("accepting connection from {}", &client_addr);
+    match server.accept(inbound).await? {
+        Accept::Established(mut snowys) => {
+            let mut outbound = TcpStream::connect(&opt.remote_addr).await?;
+            println!("snowy relaying {} to {}", &client_addr, &opt.remote_addr);
+            tokio::io::copy_bidirectional(&mut snowys, &mut outbound)
+                .await
+                .map(|_| ())
+        }
+        Accept::Unauthenticated { buf, mut io } => {
+            // fallback to naive relay; TODO: option for strategy
+            let mut outbound = TcpStream::connect(&opt.camouflage_addr).await?;
+            outbound.write_all(&buf).await?;
+            tokio::io::copy_bidirectional(&mut io, &mut outbound)
+                .await
+                .map(|_| ())
+        }
+    }
+}
+
+pub async fn run_client(opt: CltOpt) -> Result<()> {
+    println!("remote: {}, sni: {}", &opt.remote_addr, &opt.sni);
+    let client = Arc::new(Client {
+        key: derive_psk(opt.key.as_bytes()),
+        server_name: opt.sni.as_str().try_into().unwrap(),
+    });
+    let opt = Arc::new(opt);
+
+    let listener = TcpListener::bind(opt.listen_addr).await?;
+
+    while let Ok((mut inbound, client_addr)) = listener.accept().await {
+        let client = client.clone();
+        let opt = opt.clone();
+        tokio::spawn(async move {
+            println!("accpeted: {}", client_addr);
+            let outbound = TcpStream::connect(&opt.remote_addr).await?;
+            println!("connected to: {}", &opt.remote_addr);
+            let mut snowys = client.connect(outbound).await?;
+            tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await
+        });
     }
     Ok(())
 }

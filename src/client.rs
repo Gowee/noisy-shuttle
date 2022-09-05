@@ -1,11 +1,10 @@
-use anyhow::Result;
 use rustls::ServerName;
 
 use rand::Rng;
 
 use tokio::io::AsyncReadExt;
 
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
 use tokio_rustls::TlsConnector;
 
@@ -15,22 +14,21 @@ use std::io;
 
 use std::sync::Arc;
 
-use crate::opt::Opt;
 use crate::utils::u16_from_slice;
 use crate::utils::{HandshakeStateExt, NoCertificateVerification};
 
-use super::common::{SnowyStream, NOISE_PARAMS};
+use super::common::{SnowyStream, NOISE_PARAMS, PSKLEN};
 
-const LISTEN_ADDR: &str = "127.0.0.1:9999";
-const REMOTE_ADDR: &str = "127.0.0.1:44443";
-const CAMOUFLAGE_DOMAIN: &str = "www.petalsearch.com";
+// const LISTEN_ADDR: &str = "127.0.0.1:9999";
+// const REMOTE_ADDR: &str = "104.207.153.112:44443";
+// const CAMOUFLAGE_DOMAIN: &str = "www.petalsearch.com";
 // const CAMOUFLAGE_ADDR: &'static str = "59.82.60.28:443";
 // const KEY: &'static str = "Winnie the P00h";
-const KEY: &[u8] = b"i don't care for fidget spinners";
+// const KEY: &[u8] = b"i don't care for fidget spinner";
 
 #[derive(Debug, Clone)]
 pub struct Client {
-    pub key: [u8; 32],
+    pub key: [u8; PSKLEN],
     // pub remote_addr: SocketAddr,
     pub server_name: ServerName,
     // pub verify_tls: bool,
@@ -82,62 +80,4 @@ impl Client {
 
         Ok(SnowyStream::new(socket, noise))
     }
-}
-
-pub async fn run_client(_opt: Opt) -> Result<()> {
-    let client = Client {
-        key: KEY.try_into().unwrap(),
-        // remote_addr: REMOTE_ADDR.parse::<SocketAddr>().unwrap(),
-        server_name: CAMOUFLAGE_DOMAIN.try_into().unwrap(),
-    };
-
-    let listener = TcpListener::bind(LISTEN_ADDR).await?;
-
-    while let Ok((mut inbound, client_addr)) = listener.accept().await {
-        let client = (&client).clone();
-        tokio::spawn(async move {
-            println!("accpeted: {}", client_addr);
-            let outbound = TcpStream::connect(REMOTE_ADDR).await?;
-            let mut snowys = client.clone().connect(outbound).await?;
-            tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await
-        });
-        // let mut outbound = TcpStream::connect(REMOTE_ADDR).await?;
-        // let mut snowys = client.connect(outbound).await?;
-        // let (mut ai, mut ao) = tokio::io::split(snowys);
-        // let (mut bi, mut bo) = inbound.into_split();
-        // let a = tokio::spawn(async move {
-        //     let mut buf = vec![0u8; 10240];
-        //     // loop {
-        //     //     let len = ai.read(&mut buf).await.unwrap();
-        //     //     if len == 0 {
-        //     //         break;
-        //     //     }
-        //     //     sleep(Duration::from_secs(3)).await;
-        //     //     bo.write_all(&buf[..len]).await.unwrap();
-        //     // }
-        //     dbg!(tokio::io::copy(&mut ai, &mut bo).await);
-        // });
-        // let b = tokio::spawn(async move {
-        //     let mut buf = vec![0u8; 10240];
-        //     // loop {
-        //     //     let len = bi.read(&mut buf).await.unwrap();
-        //     //     if len == 0 {
-        //     //         break;
-        //     //     }
-        //     //     sleep(Duration::from_secs(3)).await;
-        //     //     ao.write_all(&buf[..len]).await.unwrap();
-        //     // }
-        //     dbg!(tokio::io::copy(&mut bi, &mut ao).await);
-        // });
-        // a.await;
-        // b.await;
-        // tokio::spawn(async move {
-        //     println!(
-        //         "{} done {:?}",
-        //         client_addr,
-        //         tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await
-        //     );
-        // });
-    }
-    Ok(())
 }

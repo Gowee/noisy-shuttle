@@ -1,26 +1,20 @@
-use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use tokio::net::{
     tcp::{ReadHalf, WriteHalf},
-    TcpListener, TcpStream,
+    TcpStream,
 };
 
 use std::io;
 use std::net::SocketAddr;
 
-use super::common::{SnowyStream, NOISE_PARAMS};
-use crate::opt::Opt;
+use super::common::{SnowyStream, NOISE_PARAMS, PSKLEN};
+
 use crate::utils::u16_from_slice;
 
-const LISTEN_ADDR: &str = "0.0.0.0:44443";
-// const CAMOUFLAGE_DOMAIN: &'static str = "www.petalsearch.com";
-const REMOTE_ADDR: &str = "127.0.0.1:10086";
-const CAMOUFLAGE_ADDR: &str = "114.119.183.177:443";
-// const KEY: &'static str = "Winnie the P00h";
-const KEY: &[u8] = b"i don't care for fidget spinners";
-
-struct Server {
-    pub key: [u8; 32],
+#[derive(Debug, Clone)]
+pub struct Server {
+    pub key: [u8; PSKLEN],
     pub camouflage_addr: SocketAddr,
 }
 
@@ -35,16 +29,16 @@ impl Server {
         //   record header + handshake header + server version + server random + session id len +
         //   session id
         // Noise: -> psk, e
-        let mut buf = [0u8; 5 + 4 + 2 + 32 + 1 + 32];
-        inbound.read_exact(&mut buf).await?; // TODO: validate header
+        let mut ping = [0u8; 5 + 4 + 2 + 32 + 1 + 32];
+        inbound.read_exact(&mut ping).await?; // TODO: validate header
         let mut psk_e = [0u8; 48];
-        psk_e[..32].copy_from_slice(&buf[buf.len() - 65..buf.len() - 33]); // client random
-        psk_e[32..].copy_from_slice(&buf[buf.len() - 32..buf.len() - 16]); // session id
+        psk_e[..32].copy_from_slice(&ping[ping.len() - 65..ping.len() - 33]); // client random
+        psk_e[32..].copy_from_slice(&ping[ping.len() - 32..ping.len() - 16]); // session id
 
         // println!("S: e, psk {:x?}", &psk_e[..48]);
         if responder.read_message(&psk_e, &mut []).is_err() {
             return Ok(Accept::Unauthenticated {
-                buf: buf.into(),
+                buf: ping.into(),
                 io: inbound,
             });
         }
@@ -52,11 +46,11 @@ impl Server {
         let mut outbound = TcpStream::connect(self.camouflage_addr).await?;
 
         // extract remaining part of client hello and send CH in whole to camouflage server
-        let msglen = u16_from_slice(&buf[3..5]) as usize;
+        let msglen = u16_from_slice(&ping[3..5]) as usize;
         let mut msgbuf = vec![0; msglen - (4 + 2 + 32 + 1 + 32)];
         inbound.read_exact(&mut msgbuf).await?;
         // TODO: write once
-        outbound.write_all(&buf).await?;
+        outbound.write_all(&ping).await?;
         outbound.write_all(&msgbuf).await?;
         // proceed to relay TLS handshake messages
         let (rin, win) = inbound.split();
@@ -80,14 +74,14 @@ impl Server {
         }
 
         // Noise: <- e, ee
-        let mut buf = [0u8; 5 + 48]; // TODO: pad to some length
-        buf[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30]);
+        let mut pong = [0u8; 5 + 48]; // TODO: pad to some length
+        pong[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30]);
         let len = responder
-            .write_message(&[], &mut buf[5..])
+            .write_message(&[], &mut pong[5..])
             .expect("Valid NOISE state");
         debug_assert_eq!(len, 48);
         // println!("S: e, ee w/ header {:x?}", &buf);
-        inbound.write_all(&buf).await?;
+        inbound.write_all(&pong).await?;
 
         let responder = responder
             .into_transport_mode()
@@ -101,41 +95,6 @@ impl Server {
 pub enum Accept {
     Established(SnowyStream),
     Unauthenticated { buf: Vec<u8>, io: TcpStream },
-}
-
-pub async fn run_server(opt: Opt) -> Result<()> {
-    assert!(opt.role.is_server());
-    let listener = TcpListener::bind(LISTEN_ADDR).await?;
-
-    while let Ok((inbound, client_addr)) = listener.accept().await {
-        tokio::spawn(handle_connection(inbound, client_addr));
-    }
-    Ok(())
-}
-
-pub async fn handle_connection(inbound: TcpStream, client_addr: SocketAddr) -> io::Result<()> {
-    println!("accepting connection from {}", &client_addr);
-    let server = Server {
-        key: KEY.try_into().unwrap(),
-        camouflage_addr: CAMOUFLAGE_ADDR.parse::<SocketAddr>().unwrap(),
-    };
-    match server.accept(inbound).await? {
-        Accept::Established(mut snowys) => {
-            let mut outbound = dbg!(TcpStream::connect(REMOTE_ADDR).await)?;
-            println!("server starting snowy relay to {}", REMOTE_ADDR);
-            tokio::io::copy_bidirectional(&mut snowys, &mut outbound)
-                .await
-                .map(|_| ())
-        }
-        Accept::Unauthenticated { buf, mut io } => {
-            // fallback to naive relay; TODO: option for strategy
-            let mut outbound = TcpStream::connect(CAMOUFLAGE_ADDR).await?;
-            outbound.write_all(&buf).await?;
-            tokio::io::copy_bidirectional(&mut io, &mut outbound)
-                .await
-                .map(|_| ())
-        }
-    }
 }
 
 async fn copy_until_handshake_finished<'a>(
@@ -170,7 +129,10 @@ async fn copy_until_handshake_finished<'a>(
         // let header_ref = header_buf.insert(header_buf);
         if header_buf[0] != HANDSHAKE {
             if header_buf[0] != CHANGE_CIPHER_SPEC {
-                panic!("invalid header");
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid TLS state",
+                ));
             }
             if !has_seen_change_cipher_spec {
                 has_seen_change_cipher_spec = true;

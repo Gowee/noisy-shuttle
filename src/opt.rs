@@ -4,21 +4,24 @@ use structopt::{
 };
 
 use std::net::SocketAddr;
-use std::str::FromStr;
 
-#[derive(StructOpt, Debug)]
-#[structopt(name = "nshuttle", about = "Shuttle for the Internet", global_settings(&[ColoredHelp, DeriveDisplayOrder]))]
-pub struct Opt {
-    #[structopt(name = "ROLE")]
-    pub role: Role,
-    // #[structopt(long)]
-    // foobar: bool,
+#[derive(Debug, Clone, StructOpt)]
+#[structopt(name = "noisy-shuttle", about = "Shuttle for the Internet", global_settings(&[ColoredHelp, DeriveDisplayOrder]))]
+pub enum Opt {
+    /// Runs client
+    Client(CltOpt),
+    /// Runs server
+    Server(SvrOpt),
+}
+
+#[derive(Debug, Clone, StructOpt)]
+pub struct CltOpt {
     /// Local HOST:PORT address to listen on
     #[structopt(name = "LISTEN_ADDR")]
     pub listen_addr: SocketAddr,
 
-    /// File(s) to convert in-place (omit for stdin/out)  
-    #[structopt(name = "REMOTE_ADDR")] //, parse(from_os_str))]
+    /// Server HOST:PORT address to connect to
+    #[structopt(name = "REMOTE_ADDR")]
     pub remote_addr: String,
 
     /// Server name indication to send to the remote
@@ -30,31 +33,20 @@ pub struct Opt {
     pub key: String,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Role {
-    Server,
-    Client,
-}
+#[derive(Debug, Clone, StructOpt)]
+pub struct SvrOpt {
+    /// Local HOST:PORT address to listen on
+    #[structopt(name = "LISTEN_ADDR")]
+    pub listen_addr: SocketAddr,
 
-impl Role {
-    pub fn is_server(self) -> bool {
-        self == Role::Server
-    }
+    /// Upstream HOST:PORT address to proxy
+    #[structopt(name = "REMOTE_ADDR")] //, parse(from_os_str))]
+    pub remote_addr: String,
 
-    pub fn is_client(self) -> bool {
-        self == Role::Client
-    }
-}
+    /// Camouflage HOST:PORT address to connect to for replicating TLS handshaking
+    pub camouflage_addr: String,
 
-impl FromStr for Role {
-    type Err = &'static str;
-    fn from_str(s: &str) -> Result<Role, Self::Err> {
-        if s.eq_ignore_ascii_case("server") {
-            Ok(Role::Server)
-        } else if s.eq_ignore_ascii_case("client") {
-            Ok(Role::Client)
-        } else {
-            Err("Neither server nor client")
-        }
-    }
+    /// The key to encrypt all traffic
+    #[structopt(name = "KEY")]
+    pub key: String,
 }
