@@ -1,19 +1,18 @@
 use anyhow::Result;
 use rustls::ServerName;
 
-use rand::{thread_rng, Rng};
-use rustls::internal::msgs::handshake::Random;
-use rustls::internal::msgs::handshake::SessionID;
+use rand::Rng;
+
 use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
+
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{sleep, Duration};
+
 use tokio_rustls::TlsConnector;
 
 // use futures::FutureExt;
 
 use std::io;
-use std::net::SocketAddr;
+
 use std::sync::Arc;
 
 use crate::opt::Opt;
@@ -38,7 +37,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn connect(&self, mut stream: TcpStream) -> io::Result<SnowyStream> {
+    pub async fn connect(&self, stream: TcpStream) -> io::Result<SnowyStream> {
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
             .build_initiator()

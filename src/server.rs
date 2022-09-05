@@ -4,7 +4,6 @@ use tokio::net::{
     tcp::{ReadHalf, WriteHalf},
     TcpListener, TcpStream,
 };
-use tokio::time::{sleep, Duration};
 
 use std::io;
 use std::net::SocketAddr;
@@ -35,6 +34,7 @@ impl Server {
         //      https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L88
         //   record header + handshake header + server version + server random + session id len +
         //   session id
+        // Noise: -> psk, e
         let mut buf = [0u8; 5 + 4 + 2 + 32 + 1 + 32];
         inbound.read_exact(&mut buf).await?; // TODO: validate header
         let mut psk_e = [0u8; 48];
@@ -47,17 +47,6 @@ impl Server {
                 buf: buf.into(),
                 io: inbound,
             });
-            // tokio::spawn(async move {
-            // let mut outbound = TcpStream::connect(self.camouflage_addr).await?;
-            // outbound.write_all(&buf).await?;
-            // tokio::io::copy_bidirectional(&mut inbound, &mut outbound)
-            //     .await
-            //     .map(|_| ())?;
-            // })
-            // .await;
-            // return Err(io::Err)
-            // unimplemented!();
-            // return Ok(());
         }
 
         let mut outbound = TcpStream::connect(self.camouflage_addr).await?;
@@ -108,6 +97,7 @@ impl Server {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum Accept {
     Established(SnowyStream),
     Unauthenticated { buf: Vec<u8>, io: TcpStream },
@@ -123,77 +113,29 @@ pub async fn run_server(opt: Opt) -> Result<()> {
     Ok(())
 }
 
-pub async fn handle_connection(inbound: TcpStream, client_addr: SocketAddr) -> Result<()> {
-    dbg!(&client_addr);
+pub async fn handle_connection(inbound: TcpStream, client_addr: SocketAddr) -> io::Result<()> {
+    println!("accepting connection from {}", &client_addr);
     let server = Server {
         key: KEY.try_into().unwrap(),
         camouflage_addr: CAMOUFLAGE_ADDR.parse::<SocketAddr>().unwrap(),
     };
-    let mut snowys = match server.accept(inbound).await? {
-        Accept::Established(snowys) => snowys,
+    match server.accept(inbound).await? {
+        Accept::Established(mut snowys) => {
+            let mut outbound = dbg!(TcpStream::connect(REMOTE_ADDR).await)?;
+            println!("server starting snowy relay to {}", REMOTE_ADDR);
+            tokio::io::copy_bidirectional(&mut snowys, &mut outbound)
+                .await
+                .map(|_| ())
+        }
         Accept::Unauthenticated { buf, mut io } => {
             // fallback to naive relay; TODO: option for strategy
             let mut outbound = TcpStream::connect(CAMOUFLAGE_ADDR).await?;
             outbound.write_all(&buf).await?;
             tokio::io::copy_bidirectional(&mut io, &mut outbound)
                 .await
-                .map(|_| ())?;
-            return Ok(());
+                .map(|_| ())
         }
-    };
-
-    // dbg!("server camouflage done", REMOTE_ADDR);
-    let mut outbound = dbg!(TcpStream::connect(REMOTE_ADDR).await)?;
-    dbg!("server starting snowy relay to", REMOTE_ADDR);
-    // let mut buf = vec![0u8; 1024];
-    // let len = snowys.read(&mut buf).await?;
-    // outbound.write_all(&buf[..len]).await?;
-    // let len = outbound.read(&mut buf).await?;
-    // snowys.write_all(&buf[..len]).await?;
-    // snowys.flush().await?;
-    // snowys.shutdown().await?;
-    // let (mut ai, mut ao) = tokio::io::split(snowys);
-    // let (mut bi, mut bo) = tokio::io::split(outbound);
-    // let a = tokio::spawn(async move {
-    //     let mut buf = vec![0u8; 10240];
-    //     loop {
-    //         let len = dbg!(ai.read(&mut buf).await).unwrap();
-    //         if len == 0 {
-    //             break;
-    //         }
-    //         dbg!(bo.write_all(&buf[..len]).await).unwrap();
-    //     }
-    //     // dbg!(tokio::io::copy(&mut ai, &mut bo).await);
-    // });
-    // let b = tokio::spawn(async move {
-    //     let mut buf = vec![0u8; 10240];
-    //     loop {
-    //         let len = dbg!(bi.read(&mut buf).await).unwrap();
-    //         if len == 0 {
-    //             break;
-    //         }
-    //         dbg!(ao.write_all(&buf[..len]).await).unwrap();
-    //     }
-    //     // dbg!(tokio::io::copy(&mut bi, &mut ao).await).unwrap();
-    // });
-    // a.await;
-    // b.await;
-
-    println!(
-        "{} done {:?}",
-        client_addr,
-        tokio::io::copy_bidirectional(&mut snowys, &mut outbound).await
-    );
-
-    // dbg!("server exiing!!!");
-    // snowys.write_all(b"pong").await?;
-    // let mut buf = [0u8; 32];
-    // dbg!("beb");
-    // let len = snowys.read(&mut buf).await?;
-    // println!("{}", String::from_utf8_lossy(&buf[..len]));
-    // dbg!("Done");
-
-    Ok(())
+    }
 }
 
 async fn copy_until_handshake_finished<'a>(
@@ -217,7 +159,7 @@ async fn copy_until_handshake_finished<'a>(
         let data_size = u16_from_slice(&header_buf[3..5]) as usize;
 
         // copy header and that much data
-        write_half.write_all(&mut header_buf).await?;
+        write_half.write_all(&header_buf).await?;
         if data_size > data_buf.len() {
             data_buf.resize(data_size, 0);
         }
@@ -241,49 +183,3 @@ async fn copy_until_handshake_finished<'a>(
     }
     Ok(())
 }
-
-// async fn copy_until_eof<'a>(
-//     mut read_half: ReadHalf<'a>,
-//     mut write_half: WriteHalf<'a>,
-// ) -> Result<(), Box<dyn Error>> {
-//     const HANDSHAKE: u8 = 0x16;
-//     const CHANGE_CIPHER_SPEC: u8 = 0x14;
-//     // header_buf is used to read handshake frame header, will be a fixed size buffer.
-//     let mut header_buf = [0u8; 5];
-//     // data_buf is used to read and write data, and can be expanded.
-//     let mut data_buf = vec![0u8; 2048];
-//     let mut has_seen_change_cipher_spec = false;
-
-//     loop {
-//         // read exact 5 bytes
-//         read_half.read_exact(&mut header_buf).await?;
-
-//         // parse length
-//         let data_size = u16_from_slice(&header_buf[3..5]) as usize;
-
-//         // copy header and that much data
-//         write_half.write_all(&mut header_buf).await?;
-//         if data_size > data_buf.len() {
-//             data_buf.resize(data_size, 0);
-//         }
-//         dbg!(data_size, data_buf.len());
-//         read_half.read_exact(&mut data_buf[0..data_size]).await?;
-//         write_half.write_all(&data_buf[0..data_size]).await?;
-
-//         // check header type
-//         // let header_ref = header_buf.insert(header_buf);
-//         if header_buf[0] != HANDSHAKE {
-//             if header_buf[0] != CHANGE_CIPHER_SPEC {
-//                 panic!("invalid header");
-//             }
-//             if !has_seen_change_cipher_spec {
-//                 has_seen_change_cipher_spec = true;
-//                 continue;
-//             }
-//         }
-//         if has_seen_change_cipher_spec {
-//             break;
-//         }
-//     }
-//     Ok(())
-// }

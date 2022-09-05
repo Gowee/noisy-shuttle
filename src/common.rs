@@ -1,4 +1,3 @@
-use futures::ready;
 use lazy_static::lazy_static;
 use rustls::internal::msgs::deframer::MessageDeframer;
 use snow::{params::NoiseParams, TransportState};
@@ -192,7 +191,7 @@ impl AsyncWrite for SnowyStream {
             this.write_buffer.truncate(5 + len);
             // println!("W {:x?}", this.write_buffer);
         }
-        Poll::Ready(Ok(offset))
+        // Poll::Ready(Ok(offset))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -278,18 +277,4 @@ impl SnowyState {
     pub fn readable(&self) -> bool {
         !matches!(*self, SnowyState::ReadShutdown | SnowyState::FullyShutdown)
     }
-}
-
-use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum SnowyError {
-    #[error("Underlying IO error")]
-    Io(#[from] io::Error),
-    #[error("the data for key `{0}` is not available")]
-    Redaction(String),
-    #[error("invalid header (expected {expected:?}, found {found:?})")]
-    InvalidHeader { expected: String, found: String },
-    #[error("unknown data store error")]
-    Unknown,
 }

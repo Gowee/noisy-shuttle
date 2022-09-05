@@ -16,7 +16,6 @@ anyhow = "1.0"
 structopt = "0.3"
 clap = "3.2.18"
 futures = "0.3"
-thiserror = "1.0.34"
 rand = "0.8.5"
 
 [patch.crates-io]
