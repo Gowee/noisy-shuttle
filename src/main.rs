@@ -6,6 +6,7 @@ use structopt::StructOpt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::lookup_host;
 use tokio::net::{TcpListener, TcpStream};
+use tracing::info;
 
 use std::io;
 use std::net::SocketAddr;
@@ -24,6 +25,9 @@ mod utils;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+    tracing_subscriber::fmt::init();
+
     let opt = Opt::from_args();
     match opt {
         Opt::Client(opt) => run_client(opt).await?,
@@ -42,8 +46,8 @@ pub async fn run_server(opt: SvrOpt) -> Result<()> {
                 "could not resolve to any address",
             )
         })?;
-    println!(
-        "remote: {}, camouflage: {}",
+    info!(
+        "server is up with remote: {}, camouflage: {}",
         opt.remote_addr, camouflage_addr
     );
     let server = Arc::new(Server {
@@ -66,17 +70,21 @@ pub async fn handle_server_connection(
     client_addr: SocketAddr,
     opt: Arc<SvrOpt>,
 ) -> io::Result<()> {
-    println!("accepting connection from {}", &client_addr);
+    info!("accepting connection from {}", &client_addr);
     match server.accept(inbound).await? {
         Accept::Established(mut snowys) => {
             let mut outbound = TcpStream::connect(&opt.remote_addr).await?;
-            println!("snowy relaying {} to {}", &client_addr, &opt.remote_addr);
+            info!("snowy relay: {} -> {}", &client_addr, &opt.remote_addr);
             tokio::io::copy_bidirectional(&mut snowys, &mut outbound)
                 .await
                 .map(|_| ())
         }
         Accept::Unauthenticated { buf, mut io } => {
             // fallback to naive relay; TODO: option for strategy
+            info!(
+                "camouflage relay: {} -> {} (unauthenticated)",
+                &client_addr, &opt.camouflage_addr
+            );
             let mut outbound = TcpStream::connect(&opt.camouflage_addr).await?;
             outbound.write_all(&buf).await?;
             tokio::io::copy_bidirectional(&mut io, &mut outbound)
@@ -87,7 +95,10 @@ pub async fn handle_server_connection(
 }
 
 pub async fn run_client(opt: CltOpt) -> Result<()> {
-    println!("remote: {}, sni: {}", &opt.remote_addr, &opt.sni);
+    info!(
+        "client is up with remote: {}, sni: {}",
+        &opt.remote_addr, &opt.sni
+    );
     let client = Arc::new(Client {
         key: derive_psk(opt.key.as_bytes()),
         server_name: opt.sni.as_str().try_into().unwrap(),
@@ -99,10 +110,10 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     while let Ok((mut inbound, client_addr)) = listener.accept().await {
         let client = client.clone();
         let opt = opt.clone();
+        info!("accpeting connection from: {}", client_addr);
         tokio::spawn(async move {
-            println!("accpeted: {}", client_addr);
             let outbound = TcpStream::connect(&opt.remote_addr).await?;
-            println!("connected to: {}", &opt.remote_addr);
+            info!("snowy relay {} -> {}", &client_addr, &opt.remote_addr);
             let mut snowys = client.connect(outbound).await?;
             tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await
         });
