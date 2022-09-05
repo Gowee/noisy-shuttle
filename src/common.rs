@@ -72,7 +72,6 @@ impl AsyncRead for SnowyStream {
                 // dbg!(this.read_offset, len, this.read_buffer.len());
                 has_read = true;
                 if this.read_offset < this.read_buffer.len() {
-                    //  buf.initialize_unfilled().len() == 0{
                     break;
                 }
             }
@@ -93,7 +92,7 @@ impl AsyncRead for SnowyStream {
                     .read_message(&message.payload.0, &mut this.read_buffer)
                     .expect("TODO");
                 this.read_buffer.truncate(len);
-                println!("R {}", String::from_utf8_lossy(&this.read_buffer));
+                // println!("R {}", String::from_utf8_lossy(&this.read_buffer));
             } else {
                 // dbg!("aaa");
                 let n = match this.tls_deframer.read(&mut SyncReadAdapter {
@@ -108,7 +107,6 @@ impl AsyncRead for SnowyStream {
                         n
                     }
                     Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        // dbg!(000999);
                         return if has_read {
                             Poll::Ready(Ok(()))
                         } else {
@@ -120,12 +118,9 @@ impl AsyncRead for SnowyStream {
                         return dbg!(Poll::Ready(Err(err)));
                     }
                     Err(err) => {
-                        // dbg!(&err);
                         return dbg!(Poll::Ready(Err(err)));
                     }
                 };
-                // debug_assert!(n > 0, "TODO");
-                // dbg!(3324);
                 if n == 0 {
                     // EoF
                     return Poll::Ready(Ok(()));
@@ -146,9 +141,7 @@ impl AsyncWrite for SnowyStream {
             return Poll::Ready(Ok(0));
         }
         let mut this = self.get_mut();
-        // TODO: MessageFragmenter
-        // TODO: min size
-        println!("poll write {}", String::from_utf8_lossy(&buf));
+        // println!("poll write {}", String::from_utf8_lossy(&buf));
         let mut offset = 0;
         loop {
             while this.write_offset != this.write_buffer.len() {
@@ -156,7 +149,7 @@ impl AsyncWrite for SnowyStream {
                     .poll_write(cx, &this.write_buffer[this.write_offset..])
                 {
                     Poll::Ready(r) => {
-                        dbg!(&this.socket);
+                        // dbg!(&this.socket);
                         let n = dbg!(r)?;
                         if n == 0 {
                             // TODO: clean write buffer?
@@ -184,7 +177,7 @@ impl AsyncWrite for SnowyStream {
                 this.write_buffer.set_len(5 + MAXIMUM_MESSAGE_LENGTH);
             }
             this.write_buffer[0..3].copy_from_slice(&[0x17, 0x03, 0x03]);
-            println!("W {}", String::from_utf8_lossy(&buf));
+            // println!("W {}", String::from_utf8_lossy(&buf));
             let len = this
                 .noise
                 .write_message(
@@ -195,9 +188,9 @@ impl AsyncWrite for SnowyStream {
             offset += buf.len().min(MAXIMUM_MESSAGE_LENGTH + offset);
             // assert!(offset < buf.len());
             this.write_buffer[3..5].copy_from_slice(&(len as u16).to_be_bytes());
-            dbg!(len, &(len as u16).to_be_bytes());
+            // dbg!(len, &(len as u16).to_be_bytes());
             this.write_buffer.truncate(5 + len);
-            println!("W {:x?}", this.write_buffer);
+            // println!("W {:x?}", this.write_buffer);
         }
         Poll::Ready(Ok(offset))
     }
@@ -285,4 +278,18 @@ impl SnowyState {
     pub fn readable(&self) -> bool {
         !matches!(*self, SnowyState::ReadShutdown | SnowyState::FullyShutdown)
     }
+}
+
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum SnowyError {
+    #[error("Underlying IO error")]
+    Io(#[from] io::Error),
+    #[error("the data for key `{0}` is not available")]
+    Redaction(String),
+    #[error("invalid header (expected {expected:?}, found {found:?})")]
+    InvalidHeader { expected: String, found: String },
+    #[error("unknown data store error")]
+    Unknown,
 }

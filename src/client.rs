@@ -1,6 +1,9 @@
 use anyhow::Result;
 use rustls::ServerName;
 
+use rand::{thread_rng, Rng};
+use rustls::internal::msgs::handshake::Random;
+use rustls::internal::msgs::handshake::SessionID;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -9,6 +12,7 @@ use tokio_rustls::TlsConnector;
 
 // use futures::FutureExt;
 
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -25,22 +29,28 @@ const CAMOUFLAGE_DOMAIN: &str = "www.petalsearch.com";
 // const KEY: &'static str = "Winnie the P00h";
 const KEY: &[u8] = b"i don't care for fidget spinners";
 
+#[derive(Debug, Clone)]
 pub struct Client {
     pub key: [u8; 32],
-    pub remote_addr: SocketAddr,
+    // pub remote_addr: SocketAddr,
     pub server_name: ServerName,
     // pub verify_tls: bool,
 }
 
 impl Client {
-    pub async fn connect(&self) -> Result<SnowyStream> {
+    pub async fn connect(&self, mut stream: TcpStream) -> io::Result<SnowyStream> {
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
-            .psk(0, KEY)
-            .build_initiator()?;
-        // Noise: -> e, psk
-        let ping = initiator.writen::<48>()?;
+            .psk(0, &self.key)
+            .build_initiator()
+            .expect("Valid NOISE params");
+        // Noise: -> psk, e
+        let ping = initiator.writen::<48>().expect("Valid NOISE state");
+        let random = <[u8; 32]>::try_from(&ping[0..32]).unwrap();
+        let mut session_id = [0u8; 32];
+        session_id[..16].copy_from_slice(&ping[32..48]);
+        // pad to make it of a typical size
+        rand::thread_rng().fill(&mut session_id[16..]);
 
-        let socket = TcpStream::connect(self.remote_addr).await?;
         let tlsconf = rustls::ClientConfig::builder()
             .with_safe_defaults()
             .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
@@ -48,23 +58,28 @@ impl Client {
         let connector = TlsConnector::from(Arc::new(tlsconf.clone()));
         let tlsconn = rustls::ClientConnection::new_with_random_and_session_id(
             Arc::new(tlsconf.clone()),
-            CAMOUFLAGE_DOMAIN.try_into().unwrap(),
-            <[u8; 32]>::try_from(&ping[0..32]).unwrap().into(),
-            (&ping[32..48]).into(), // TODO: fill up to 32 bytes
-        )?;
+            self.server_name.clone(),
+            random.into(),
+            session_id.as_slice().into(),
+        )
+        .expect("Valid TLS config");
         // perform real handshake
         let (mut socket, _tlsconn) = connector
-            .connect_with(self.server_name.clone(), socket, |conn| *conn = tlsconn)
+            .connect_with(self.server_name.clone(), stream, |conn| *conn = tlsconn)
             .await?
             .into_inner();
-        dbg!("aaa");
+
         // Noise: <- e, ee
         let mut pong = [0u8; 5 + 48];
         socket.read_exact(&mut pong).await?;
-        println!("C: e, ee w/ header {:x?}", &pong);
-        debug_assert!(dbg!(u16_from_slice(&pong[3..5])) == 48);
-        initiator.read_message(&pong[5..], &mut [])?;
-        let noise = initiator.into_transport_mode()?;
+        // println!("C: e, ee w/ header {:x?}", &pong);
+        debug_assert_eq!(u16_from_slice(&pong[3..5]), 48);
+        initiator
+            .read_message(&pong[5..], &mut [])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?; // TODO: allow recovery?
+        let noise = initiator
+            .into_transport_mode()
+            .expect("NOISE handshake finished");
 
         Ok(SnowyStream::new(socket, noise))
     }
@@ -73,14 +88,22 @@ impl Client {
 pub async fn run_client(_opt: Opt) -> Result<()> {
     let client = Client {
         key: KEY.try_into().unwrap(),
-        remote_addr: REMOTE_ADDR.parse::<SocketAddr>().unwrap(),
+        // remote_addr: REMOTE_ADDR.parse::<SocketAddr>().unwrap(),
         server_name: CAMOUFLAGE_DOMAIN.try_into().unwrap(),
     };
 
     let listener = TcpListener::bind(LISTEN_ADDR).await?;
 
     while let Ok((mut inbound, client_addr)) = listener.accept().await {
-        let mut snowys = client.connect().await?;
+        let client = (&client).clone();
+        tokio::spawn(async move {
+            println!("accpeted: {}", client_addr);
+            let outbound = TcpStream::connect(REMOTE_ADDR).await?;
+            let mut snowys = client.clone().connect(outbound).await?;
+            tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await
+        });
+        // let mut outbound = TcpStream::connect(REMOTE_ADDR).await?;
+        // let mut snowys = client.connect(outbound).await?;
         // let (mut ai, mut ao) = tokio::io::split(snowys);
         // let (mut bi, mut bo) = inbound.into_split();
         // let a = tokio::spawn(async move {
@@ -109,71 +132,13 @@ pub async fn run_client(_opt: Opt) -> Result<()> {
         // });
         // a.await;
         // b.await;
-        println!(
-            "{} done {:?}",
-            client_addr,
-            tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await
-        );
+        // tokio::spawn(async move {
+        //     println!(
+        //         "{} done {:?}",
+        //         client_addr,
+        //         tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await
+        //     );
+        // });
     }
-
-    // snowys.write_all(b"ping").await?;
-    // sleep(Duration::from_secs(3)).await;
-
-    // let mut buf = [0u8; 32];
-    // let len = snowys.read(&mut buf).await?;
-    // println!("{}", String::from_utf8_lossy(&buf[..len]));
     Ok(())
-
-    // assert!(opt.role.is_client());
-    // let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
-    //     .psk(0, KEY)
-    //     .build_initiator()?;
-    // let mut buf = [0u8; 48];
-    // // Noise: -> psk, e
-    // assert_eq!(initiator.write_message(&[], &mut buf).unwrap(), 48);
-    // println!("C: e, psk {:x?}", &buf);
-
-    // let sock = TcpStream::connect(opt.remote_addr).await?;
-
-    // let config = rustls::ClientConfig::builder()
-    //     .with_safe_defaults()
-    //     .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
-    //     .with_no_client_auth();
-    // let connector = TlsConnector::from(Arc::new(config.clone()));
-    // let tlsconn = rustls::ClientConnection::new_with_random_and_session_id(
-    //     Arc::new(config.clone()),
-    //     CAMOUFLAGE_DOMAIN.try_into().unwrap(),
-    //     <[u8; 32]>::try_from(&buf[0..32]).unwrap().into(),
-    //     (&buf[32..48]).into(), // TODO: fill up to 32 bytes
-    // )?;
-    // // replace the underlying rustls::ClientConnection with a custom one
-    // // TODO: set at first instead of replace
-    // let connect = connector.connect_with(CAMOUFLAGE_DOMAIN.try_into().unwrap(), sock, |conn| {
-    //     *conn = tlsconn
-    // });
-    // dbg!("a");
-    // // let tokio-rustls to make real & full handshake
-    // let (mut sock, _tlsconn) = connect.await.unwrap().into_inner();
-    // dbg!("b");
-    // let mut buf = [0u8; 48];
-    // sock.read_exact(&mut buf).await?;
-    // println!("C: e, ee {:x?}", &buf);
-    // // Noise: <- e, ee
-    // initiator.read_message(&buf, &mut []).unwrap();
-    // let mut initiator = initiator.into_transport_mode()?;
-
-    // let mut buf = [0u8; 1024];
-    // let len = initiator.write_message(b"ping", &mut buf).unwrap();
-    // println!("C ping hex: {:x?}", &buf[..len]);
-    // sock.write_all(&buf[0..len]).await?;
-    // loop {
-    //     let len = sock.read(&mut buf).await?;
-    //     if len == 0 {
-    //         break;
-    //     }
-    //     let len = initiator.read_message(&buf.clone()[0..len], &mut buf)?;
-    //     println!("C pong hex: {:x?}", &buf[..len]);
-    //     println!("{}", String::from_utf8_lossy(&buf[..len]));
-    // }
-    // Ok(())
 }
