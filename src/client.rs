@@ -1,9 +1,10 @@
 use anyhow::Result;
 use rustls::ServerName;
-use snow::TransportState;
+
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
-use tokio::net::{lookup_host, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{sleep, Duration};
 use tokio_rustls::TlsConnector;
 
 // use futures::FutureExt;
@@ -12,13 +13,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::opt::Opt;
+use crate::utils::u16_from_slice;
 use crate::utils::{HandshakeStateExt, NoCertificateVerification};
 
 use super::common::{SnowyStream, NOISE_PARAMS};
 
-const LISTEN_ADDR: &'static str = "127.0.0.1:44443";
-const CAMOUFLAGE_DOMAIN: &'static str = "www.aliexpress.com";
-const CAMOUFLAGE_ADDR: &'static str = "59.82.60.28:443";
+const LISTEN_ADDR: &str = "127.0.0.1:9999";
+const REMOTE_ADDR: &str = "127.0.0.1:44443";
+const CAMOUFLAGE_DOMAIN: &str = "www.petalsearch.com";
+// const CAMOUFLAGE_ADDR: &'static str = "59.82.60.28:443";
 // const KEY: &'static str = "Winnie the P00h";
 const KEY: &[u8] = b"i don't care for fidget spinners";
 
@@ -56,24 +59,69 @@ impl Client {
             .into_inner();
         dbg!("aaa");
         // Noise: <- e, ee
-        let mut pong = [0u8; 48];
+        let mut pong = [0u8; 5 + 48];
         socket.read_exact(&mut pong).await?;
-        initiator.read_message(&pong, &mut [])?;
+        println!("C: e, ee w/ header {:x?}", &pong);
+        debug_assert!(dbg!(u16_from_slice(&pong[3..5])) == 48);
+        initiator.read_message(&pong[5..], &mut [])?;
         let noise = initiator.into_transport_mode()?;
 
         Ok(SnowyStream::new(socket, noise))
     }
 }
 
-pub async fn run_client(opt: Opt) -> Result<()> {
+pub async fn run_client(_opt: Opt) -> Result<()> {
     let client = Client {
         key: KEY.try_into().unwrap(),
-        remote_addr: LISTEN_ADDR.parse::<SocketAddr>().unwrap(),
+        remote_addr: REMOTE_ADDR.parse::<SocketAddr>().unwrap(),
         server_name: CAMOUFLAGE_DOMAIN.try_into().unwrap(),
     };
-    let mut snowys = client.connect().await?;
 
-    snowys.write_all(b"ping").await?;
+    let listener = TcpListener::bind(LISTEN_ADDR).await?;
+
+    while let Ok((mut inbound, client_addr)) = listener.accept().await {
+        let mut snowys = client.connect().await?;
+        // let (mut ai, mut ao) = tokio::io::split(snowys);
+        // let (mut bi, mut bo) = inbound.into_split();
+        // let a = tokio::spawn(async move {
+        //     let mut buf = vec![0u8; 10240];
+        //     // loop {
+        //     //     let len = ai.read(&mut buf).await.unwrap();
+        //     //     if len == 0 {
+        //     //         break;
+        //     //     }
+        //     //     sleep(Duration::from_secs(3)).await;
+        //     //     bo.write_all(&buf[..len]).await.unwrap();
+        //     // }
+        //     dbg!(tokio::io::copy(&mut ai, &mut bo).await);
+        // });
+        // let b = tokio::spawn(async move {
+        //     let mut buf = vec![0u8; 10240];
+        //     // loop {
+        //     //     let len = bi.read(&mut buf).await.unwrap();
+        //     //     if len == 0 {
+        //     //         break;
+        //     //     }
+        //     //     sleep(Duration::from_secs(3)).await;
+        //     //     ao.write_all(&buf[..len]).await.unwrap();
+        //     // }
+        //     dbg!(tokio::io::copy(&mut bi, &mut ao).await);
+        // });
+        // a.await;
+        // b.await;
+        println!(
+            "{} done {:?}",
+            client_addr,
+            tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await
+        );
+    }
+
+    // snowys.write_all(b"ping").await?;
+    // sleep(Duration::from_secs(3)).await;
+
+    // let mut buf = [0u8; 32];
+    // let len = snowys.read(&mut buf).await?;
+    // println!("{}", String::from_utf8_lossy(&buf[..len]));
     Ok(())
 
     // assert!(opt.role.is_client());

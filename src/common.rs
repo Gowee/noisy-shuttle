@@ -1,6 +1,6 @@
 use futures::ready;
 use lazy_static::lazy_static;
-use rustls::internal::msgs::{deframer::MessageDeframer, message::OpaqueMessage};
+use rustls::internal::msgs::deframer::MessageDeframer;
 use snow::{params::NoiseParams, TransportState};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -8,9 +8,7 @@ use tokio::{
 };
 
 use std::{
-    collections::VecDeque,
     io::{self, Read, Result},
-    mem,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -27,13 +25,12 @@ const MAXIMUM_MESSAGE_LENGTH: usize = u16::MAX as usize;
 pub struct SnowyStream {
     pub(crate) socket: TcpStream,
     pub(crate) noise: TransportState,
+    pub(crate) state: SnowyState,
     pub(crate) tls_deframer: MessageDeframer,
     pub(crate) read_buffer: Vec<u8>,
     pub(crate) read_offset: usize,
     pub(crate) write_buffer: Vec<u8>,
     pub(crate) write_offset: usize,
-    // pub(crate) pending_read: VecDeque<>,
-    // pub(crate) pending_write: VecDeque<Vec<u8>>,
 }
 
 impl SnowyStream {
@@ -41,6 +38,7 @@ impl SnowyStream {
         SnowyStream {
             socket: io,
             noise,
+            state: SnowyState::Stream,
             tls_deframer: Default::default(),
             read_buffer: Default::default(),
             read_offset: 0,
@@ -52,87 +50,88 @@ impl SnowyStream {
 
 impl AsyncRead for SnowyStream {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<Result<()>> {
-        // Ref: https://github.com/tokio-rs/tls/blob/bcf4f8e3f96983dbb7a61808b0f1fcd04fb678ae/tokio-rustls/src/common/mod.rs#L91
-        // let mut onwire_ = [0u8; OpaqueMessage::MAX_WIRE_SIZE];
-        // let mut onwire = ReadBuf::new(&mut onwire_);
-        let this = self.get_mut();
+        if !self.state.readable() {
+            return Poll::Ready(Ok(()));
+        }
 
+        // Ref: https://github.com/tokio-rs/tls/blob/bcf4f8e3f96983dbb7a61808b0f1fcd04fb678ae/tokio-rustls/src/common/mod.rs#L91
+        let this = self.get_mut();
+        let mut has_read = false;
         loop {
             if this.read_offset < this.read_buffer.len() {
+                // println!("RP {:x?}", &this.read_buffer.as_slice()[this.read_offset..]);
                 let len = (&this.read_buffer.as_slice()[this.read_offset..])
                     .read(buf.initialize_unfilled())
                     .unwrap();
                 buf.advance(len);
                 this.read_offset += len;
-                if len < this.read_buffer.len() - this.read_offset {
+                // dbg!(this.read_offset, len, this.read_buffer.len());
+                has_read = true;
+                if this.read_offset < this.read_buffer.len() {
                     //  buf.initialize_unfilled().len() == 0{
                     break;
                 }
             }
             this.read_offset = 0;
-            // debug_assert!(this.read_buffer.is_empty());
+            this.read_buffer.clear();
 
             if let Some(message) = this.tls_deframer.frames.pop_front() {
-                dbg!(&message);
-                if message.payload.0.len() == 0 {
+                // dbg!(&message);
+                if message.payload.0.is_empty() {
                     continue;
                 }
                 this.read_buffer
                     .reserve_exact(MAXIMUM_MESSAGE_LENGTH - this.read_buffer.capacity());
                 unsafe { this.read_buffer.set_len(MAXIMUM_MESSAGE_LENGTH) };
-                println!("R {:x?}", &message.payload.0);
+                // println!("R {:x?}", &message.payload.0);
                 let len = this
                     .noise
                     .read_message(&message.payload.0, &mut this.read_buffer)
                     .expect("TODO");
                 this.read_buffer.truncate(len);
+                println!("R {}", String::from_utf8_lossy(&this.read_buffer));
             } else {
+                // dbg!("aaa");
                 let n = match this.tls_deframer.read(&mut SyncReadAdapter {
                     io: &mut this.socket,
                     cx,
                 }) {
-                    Ok(n) => n,
-                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        return Poll::Pending
+                    Ok(n) => {
+                        if n == 0 {
+                            this.state.shutdown_read();
+                            return Poll::Ready(Ok(()));
+                        }
+                        n
                     }
-                    Err(err) => return Poll::Ready(Err(err)),
+                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        // dbg!(000999);
+                        return if has_read {
+                            Poll::Ready(Ok(()))
+                        } else {
+                            Poll::Pending
+                        };
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::ConnectionAborted => {
+                        this.state.shutdown_read();
+                        return dbg!(Poll::Ready(Err(err)));
+                    }
+                    Err(err) => {
+                        // dbg!(&err);
+                        return dbg!(Poll::Ready(Err(err)));
+                    }
                 };
                 // debug_assert!(n > 0, "TODO");
+                // dbg!(3324);
                 if n == 0 {
-                    dbg!("shutodwning");
-                    break;
+                    // EoF
+                    return Poll::Ready(Ok(()));
                 }
             }
-            // if offset < cap {
-            //     break
-            // }
-            // if let Some(message) = self.message_deframer.frames.pop_front() {
-
-            // }
         }
-
-        // while let Some(msg) = self.tls_deframer.frames.pop_front() {
-        //     let s = buf.filled().len();
-        //     let len = self
-        //         .noise
-        //         .read_message(&msg.payload.0, unsafe {
-        //             mem::transmute(buf.unfilled_mut())
-        //         })
-        //         .expect("TODO");
-        //     unsafe { buf.assume_init(s + len) };
-        //     buf.advance(s);
-        // }
-        // match Pin::new(&mut self.socket).poll_read(cx, &mut onwire) {
-        //     Poll::Ready(Ok(_)) => {
-
-        //     }
-        //     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-        //     Poll::Pending => return Poll::Pending
-        // }
         Poll::Ready(Ok(()))
     }
 }
@@ -143,12 +142,13 @@ impl AsyncWrite for SnowyStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if !self.state.writeable() {
+            return Poll::Ready(Ok(0));
+        }
         let mut this = self.get_mut();
         // TODO: MessageFragmenter
         // TODO: min size
-        // self.pending_write.push_front(value)
-        // socket.poll_write(cx, &[0x17, 0x03, 0x03])?;
-        // socket.poll
+        println!("poll write {}", String::from_utf8_lossy(&buf));
         let mut offset = 0;
         loop {
             while this.write_offset != this.write_buffer.len() {
@@ -156,18 +156,26 @@ impl AsyncWrite for SnowyStream {
                     .poll_write(cx, &this.write_buffer[this.write_offset..])
                 {
                     Poll::Ready(r) => {
-                        this.write_offset += r?;
+                        dbg!(&this.socket);
+                        let n = dbg!(r)?;
+                        if n == 0 {
+                            // TODO: clean write buffer?
+                            this.state.shutdown_write();
+                            return Poll::Ready(Ok(0));
+                        }
+                        this.write_offset += n;
                     }
                     Poll::Pending => {
-                        if offset == 0 {
-                            return Poll::Pending;
+                        return if offset == 0 {
+                            Poll::Pending
                         } else {
-                            return Poll::Ready(Ok(offset));
-                        }
+                            Poll::Ready(Ok(offset))
+                        };
                     }
                 }
             }
             this.write_offset = 0;
+            this.write_buffer.clear();
             if offset == buf.len() {
                 return Poll::Ready(Ok(offset));
             }
@@ -176,6 +184,7 @@ impl AsyncWrite for SnowyStream {
                 this.write_buffer.set_len(5 + MAXIMUM_MESSAGE_LENGTH);
             }
             this.write_buffer[0..3].copy_from_slice(&[0x17, 0x03, 0x03]);
+            println!("W {}", String::from_utf8_lossy(&buf));
             let len = this
                 .noise
                 .write_message(
@@ -190,46 +199,90 @@ impl AsyncWrite for SnowyStream {
             this.write_buffer.truncate(5 + len);
             println!("W {:x?}", this.write_buffer);
         }
+        Poll::Ready(Ok(offset))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        unimplemented!();
+        let mut this = self.get_mut();
+        // unimplemented!(); FIX:
+        while this.write_offset != this.write_buffer.len() {
+            match Pin::new(&mut this.socket).poll_write(cx, &this.write_buffer[this.write_offset..])
+            {
+                Poll::Ready(r) => {
+                    this.write_offset += r?;
+                }
+                Poll::Pending => {
+                    return Poll::Pending;
+                }
+            }
+        }
+        this.write_offset = 0;
+        this.write_buffer.clear();
+        Pin::new(&mut this.socket).poll_flush(cx)
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        unimplemented!();
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.state.writeable() {
+            // self.session.send_close_notify();
+            self.state.shutdown_write();
+        }
+        // let mut this = self.get_mut();
+        // // unimplemented!(); FIX:
+        // while this.write_offset != this.write_buffer.len() {
+        //     match Pin::new(&mut this.socket).poll_write(cx, &this.write_buffer[this.write_offset..])
+        //     {
+        //         Poll::Ready(r) => {
+        //             this.write_offset += r?;
+        //         }
+        //         Poll::Pending => {
+        //             return Poll::Pending;
+        //         }
+        //     }
+        // }
+        // this.write_offset = 0;
+        // this.write_buffer.clear();
+        // ready!(Pin::new(&mut this.socket).poll_flush(cx))?;
+        Pin::new(&mut self.socket).poll_shutdown(cx)
+        // Poll::Ready(Ok(()))
     }
 }
 
-// struct TlsReader {
-//     message_deframer: MessageDeframer,
-//     buffer: Vec<u8>,
-// }
+#[derive(Debug)]
+pub enum SnowyState {
+    Stream,
+    ReadShutdown,
+    WriteShutdown,
+    FullyShutdown,
+}
 
-// impl TlsReader {
-//     fn read_in(&mut self, rd: &mut dyn io::Read) -> io::Result<usize> {
-//         self.message_deframer.read(&mut rd)
-//     }
+impl SnowyState {
+    #[inline]
+    pub fn shutdown_read(&mut self) {
+        match *self {
+            SnowyState::WriteShutdown | SnowyState::FullyShutdown => {
+                *self = SnowyState::FullyShutdown
+            }
+            _ => *self = SnowyState::ReadShutdown,
+        }
+    }
 
-//     fn read_out(&mut self, rd: &mut [u8]) -> io::Result<usize> {
-//         let cap = rd.len();
-//         let mut len = 0;
-//         let mut offset = 0;
-//         loop {
-//             if !self.buffer.is_empty() {
-//                 offset += self.buffer.as_slice().read(rd).unwrap();
-//             }
-//             if offset < cap {
-//                 break
-//             }
-//             if let Some(message) = self.message_deframer.frames.pop_front() {
+    #[inline]
+    pub fn shutdown_write(&mut self) {
+        match *self {
+            SnowyState::ReadShutdown | SnowyState::FullyShutdown => {
+                *self = SnowyState::FullyShutdown
+            }
+            _ => *self = SnowyState::WriteShutdown,
+        }
+    }
 
-//             }
-//         }
-//         // while let Some(message)  = self.message_deframer.frames.pop_front() {
-//         //     message.payload.0
-//         // }
+    #[inline]
+    pub fn writeable(&self) -> bool {
+        !matches!(*self, SnowyState::WriteShutdown | SnowyState::FullyShutdown)
+    }
 
-//         Ok((len))
-//     }
-// }
+    #[inline]
+    pub fn readable(&self) -> bool {
+        !matches!(*self, SnowyState::ReadShutdown | SnowyState::FullyShutdown)
+    }
+}
