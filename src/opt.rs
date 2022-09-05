@@ -1,7 +1,5 @@
-use structopt::{
-    clap::AppSettings::{ColoredHelp, DeriveDisplayOrder},
-    StructOpt,
-};
+use structopt::clap::AppSettings::{ColoredHelp, DeriveDisplayOrder};
+use structopt::StructOpt;
 
 use std::net::SocketAddr;
 

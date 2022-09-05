@@ -1,9 +1,6 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-use tokio::net::{
-    tcp::{ReadHalf, WriteHalf},
-    TcpStream,
-};
+use tokio::net::tcp::{ReadHalf, WriteHalf};
+use tokio::net::TcpStream;
 
 use std::io;
 use std::net::SocketAddr;
@@ -126,7 +123,6 @@ async fn copy_until_handshake_finished<'a>(
         write_half.write_all(&data_buf[0..data_size]).await?;
 
         // check header type
-        // let header_ref = header_buf.insert(header_buf);
         if header_buf[0] != HANDSHAKE {
             if header_buf[0] != CHANGE_CIPHER_SPEC {
                 return Err(io::Error::new(

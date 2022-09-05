@@ -4,8 +4,7 @@ use anyhow::Result;
 use structopt::StructOpt;
 
 use tokio::io::AsyncWriteExt;
-use tokio::net::lookup_host;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tracing::info;
 
 use std::io;

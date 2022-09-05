@@ -1,30 +1,15 @@
-use rustls::ServerName;
-
 use rand::Rng;
-
+use rustls::ServerName;
 use tokio::io::AsyncReadExt;
-
 use tokio::net::TcpStream;
-
 use tokio_rustls::TlsConnector;
 
-// use futures::FutureExt;
-
 use std::io;
-
 use std::sync::Arc;
 
-use crate::utils::u16_from_slice;
-use crate::utils::{HandshakeStateExt, NoCertificateVerification};
+use crate::utils::{u16_from_slice, HandshakeStateExt, NoCertificateVerification};
 
 use super::common::{SnowyStream, NOISE_PARAMS, PSKLEN};
-
-// const LISTEN_ADDR: &str = "127.0.0.1:9999";
-// const REMOTE_ADDR: &str = "104.207.153.112:44443";
-// const CAMOUFLAGE_DOMAIN: &str = "www.petalsearch.com";
-// const CAMOUFLAGE_ADDR: &'static str = "59.82.60.28:443";
-// const KEY: &'static str = "Winnie the P00h";
-// const KEY: &[u8] = b"i don't care for fidget spinner";
 
 #[derive(Debug, Clone)]
 pub struct Client {

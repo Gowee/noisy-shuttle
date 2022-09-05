@@ -1,17 +1,14 @@
 use blake2::{Blake2s256, Digest};
 use lazy_static::lazy_static;
 use rustls::internal::msgs::deframer::MessageDeframer;
-use snow::{params::NoiseParams, TransportState};
-use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
-    net::TcpStream,
-};
+use snow::params::NoiseParams;
+use snow::TransportState;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
 
-use std::{
-    io::{self, Read, Result},
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::io::{self, Read, Result};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use crate::utils::SyncReadAdapter;
 

@@ -1,14 +1,10 @@
-use tokio::{
-    self,
-    io::{AsyncRead, ReadBuf},
-};
+use tokio::io::{AsyncRead, ReadBuf};
+use tokio::{self};
 
-use std::{
-    convert::TryFrom,
-    io::{self, Read},
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::convert::TryFrom;
+use std::io::{self, Read};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 pub fn u16_from_slice(s: &[u8]) -> u16 {
     u16::from_be_bytes(<[u8; 2]>::try_from(s).unwrap())
@@ -56,11 +52,6 @@ impl rustls::client::ServerCertVerifier for NoCertificateVerification {
         Ok(rustls::client::ServerCertVerified::assertion())
     }
 }
-
-// fn disable_certificate_verification(cfg: &mut rustls::ClientConfig) {
-//     cfg.dangerous()
-//         .set_certificate_verifier(Arc::new(danger::NoCertificateVerification {}));
-// }
 
 // Copied from: tokio_rustls::common::SyncReadAdapter;
 //   https://github.com/tokio-rs/tls/blob/bcf4f8e3f96983dbb7a61808b0f1fcd04fb678ae/tokio-rustls/src/common/mod.rs#L345
