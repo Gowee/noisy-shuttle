@@ -58,7 +58,10 @@ pub async fn run_server(opt: SvrOpt) -> Result<()> {
     while let Ok((inbound, client_addr)) = listener.accept().await {
         let server = server.clone();
         let opt = opt.clone();
-        tokio::spawn(handle_server_connection(server, inbound, client_addr, opt));
+        tokio::spawn(async move {
+            let r = handle_server_connection(server, inbound, client_addr, opt).await;
+            info!("relay done: {:?}", r);
+        });
     }
     Ok(())
 }

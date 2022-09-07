@@ -59,10 +59,10 @@ impl Client {
         initiator
             .read_message(&pong[5..], &mut [])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?; // TODO: allow recovery?
+
         let noise = initiator
             .into_transport_mode()
             .expect("NOISE handshake finished");
-
         Ok(SnowyStream::new(socket, noise))
     }
 }

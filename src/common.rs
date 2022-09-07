@@ -6,7 +6,9 @@ use snow::TransportState;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
-use std::io::{self, Read, Result};
+use futures::ready;
+use std::cmp;
+use std::io::{self, Result};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -17,7 +19,10 @@ lazy_static! {
         "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s".parse().unwrap();
 }
 
-const MAXIMUM_MESSAGE_LENGTH: usize = u16::MAX as usize;
+pub const TLS_RECORD_HEADER_LENGTH: usize = 5; // 1 type + 2 proto ver + 2 data len
+pub const MAXIMUM_CIPHERTEXT_LENGTH: usize = u16::MAX as usize; // show::constants::MAXMSGLEN
+pub const AEAD_TAG_LENGTH: usize = 16; // show::constants::TAGLEN
+pub const MAXIMUM_PLAINTEXT_LENGTH: usize = MAXIMUM_CIPHERTEXT_LENGTH - AEAD_TAG_LENGTH;
 pub const PSKLEN: usize = 32; // snow::constants::PSKLEN;
 const SALT: &[u8] = b"the secure tunnel under snow";
 
@@ -62,14 +67,18 @@ impl AsyncRead for SnowyStream {
         let mut has_read = false;
         loop {
             if this.read_offset < this.read_buffer.len() {
-                // println!("RP {:x?}", &this.read_buffer.as_slice()[this.read_offset..]);
-                let len = (&this.read_buffer.as_slice()[this.read_offset..])
-                    .read(buf.initialize_unfilled())
-                    .unwrap();
+                let b = unsafe {
+                    &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8])
+                };
+                let len = cmp::min(this.read_buffer.len() - this.read_offset, b.len());
+                b[..len]
+                    .copy_from_slice(&this.read_buffer[this.read_offset..this.read_offset + len]);
+                unsafe {
+                    buf.assume_init(len);
+                }
                 buf.advance(len);
                 this.read_offset += len;
-                // dbg!(this.read_offset, len, this.read_buffer.len());
-                has_read = true;
+                has_read = len > 0;
                 if this.read_offset < this.read_buffer.len() {
                     break;
                 }
@@ -78,22 +87,18 @@ impl AsyncRead for SnowyStream {
             this.read_buffer.clear();
 
             if let Some(message) = this.tls_deframer.frames.pop_front() {
-                // dbg!(&message);
                 if message.payload.0.is_empty() {
                     continue;
                 }
                 this.read_buffer
-                    .reserve_exact(MAXIMUM_MESSAGE_LENGTH - this.read_buffer.capacity());
-                unsafe { this.read_buffer.set_len(MAXIMUM_MESSAGE_LENGTH) };
-                // println!("R {:x?}", &message.payload.0);
+                    .reserve_exact(MAXIMUM_PLAINTEXT_LENGTH - this.read_buffer.capacity());
+                unsafe { this.read_buffer.set_len(MAXIMUM_PLAINTEXT_LENGTH) };
                 let len = this
                     .noise
                     .read_message(&message.payload.0, &mut this.read_buffer)
                     .expect("TODO");
                 this.read_buffer.truncate(len);
-                // println!("R {}", String::from_utf8_lossy(&this.read_buffer));
             } else {
-                // dbg!("aaa");
                 let n = match this.tls_deframer.read(&mut SyncReadAdapter {
                     io: &mut this.socket,
                     cx,
@@ -140,7 +145,6 @@ impl AsyncWrite for SnowyStream {
             return Poll::Ready(Ok(0));
         }
         let mut this = self.get_mut();
-        // println!("poll write {}", String::from_utf8_lossy(&buf));
         let mut offset = 0;
         loop {
             while this.write_offset != this.write_buffer.len() {
@@ -148,8 +152,7 @@ impl AsyncWrite for SnowyStream {
                     .poll_write(cx, &this.write_buffer[this.write_offset..])
                 {
                     Poll::Ready(r) => {
-                        // dbg!(&this.socket);
-                        let n = dbg!(r)?;
+                        let n = r?;
                         if n == 0 {
                             // TODO: clean write buffer?
                             this.state.shutdown_write();
@@ -171,24 +174,26 @@ impl AsyncWrite for SnowyStream {
             if offset == buf.len() {
                 return Poll::Ready(Ok(offset));
             }
-            this.write_buffer.reserve_exact(5 + MAXIMUM_MESSAGE_LENGTH);
+            this.write_buffer
+                .reserve_exact(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
             unsafe {
-                this.write_buffer.set_len(5 + MAXIMUM_MESSAGE_LENGTH);
+                this.write_buffer
+                    .set_len(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
             }
             this.write_buffer[0..3].copy_from_slice(&[0x17, 0x03, 0x03]);
-            // println!("W {}", String::from_utf8_lossy(&buf));
-            let len = this
+            let len = cmp::min(buf.len() - offset, MAXIMUM_PLAINTEXT_LENGTH);
+            let n = this
                 .noise
                 .write_message(
-                    &buf[offset..buf.len().min(MAXIMUM_MESSAGE_LENGTH + offset)],
-                    &mut this.write_buffer[5..],
+                    &buf[offset..offset + len],
+                    &mut this.write_buffer[TLS_RECORD_HEADER_LENGTH..],
                 )
                 .unwrap();
-            offset += buf.len().min(MAXIMUM_MESSAGE_LENGTH + offset);
+            offset += len;
             // assert!(offset < buf.len());
-            this.write_buffer[3..5].copy_from_slice(&(len as u16).to_be_bytes());
+            this.write_buffer[3..5].copy_from_slice(&(n as u16).to_be_bytes());
             // dbg!(len, &(len as u16).to_be_bytes());
-            this.write_buffer.truncate(5 + len);
+            this.write_buffer.truncate(TLS_RECORD_HEADER_LENGTH + n);
             // println!("W {:x?}", this.write_buffer);
         }
         // Poll::Ready(Ok(offset))
@@ -214,28 +219,13 @@ impl AsyncWrite for SnowyStream {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.state.writeable() {
+        if !self.state.writeable() {
             // self.session.send_close_notify();
-            self.state.shutdown_write();
+            return Poll::Ready(Ok(()));
         }
-        // let mut this = self.get_mut();
-        // // unimplemented!(); FIX:
-        // while this.write_offset != this.write_buffer.len() {
-        //     match Pin::new(&mut this.socket).poll_write(cx, &this.write_buffer[this.write_offset..])
-        //     {
-        //         Poll::Ready(r) => {
-        //             this.write_offset += r?;
-        //         }
-        //         Poll::Pending => {
-        //             return Poll::Pending;
-        //         }
-        //     }
-        // }
-        // this.write_offset = 0;
-        // this.write_buffer.clear();
-        // ready!(Pin::new(&mut this.socket).poll_flush(cx))?;
+        self.state.shutdown_write();
+        ready!(self.as_mut().poll_flush(cx))?;
         Pin::new(&mut self.socket).poll_shutdown(cx)
-        // Poll::Ready(Ok(()))
     }
 }
 

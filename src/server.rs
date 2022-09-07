@@ -17,6 +17,7 @@ pub struct Server {
 
 impl Server {
     pub async fn accept(&self, mut inbound: TcpStream) -> io::Result<Accept> {
+        dbg!("acc init");
         let mut responder = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
             .build_responder()
@@ -31,7 +32,7 @@ impl Server {
         let mut psk_e = [0u8; 48];
         psk_e[..32].copy_from_slice(&ping[ping.len() - 65..ping.len() - 33]); // client random
         psk_e[32..].copy_from_slice(&ping[ping.len() - 32..ping.len() - 16]); // session id
-
+        dbg!("p0");
         // println!("S: e, psk {:x?}", &psk_e[..48]);
         if responder.read_message(&psk_e, &mut []).is_err() {
             return Ok(Accept::Unauthenticated {
@@ -41,6 +42,7 @@ impl Server {
         }
 
         let mut outbound = TcpStream::connect(self.camouflage_addr).await?;
+        dbg!("p2");
 
         // extract remaining part of client hello and send CH in whole to camouflage server
         let msglen = u16_from_slice(&ping[3..5]) as usize;
@@ -52,12 +54,14 @@ impl Server {
         // proceed to relay TLS handshake messages
         let (rin, win) = inbound.split();
         let (rout, wout) = outbound.split();
+        dbg!("copy tls hs");
         let (a, b) = tokio::join!(
             copy_until_handshake_finished(rin, wout),
             copy_until_handshake_finished(rout, win)
         );
         a?;
         b?;
+        dbg!("hs done");
         // handshake done, drop connection to camouflage server
         tokio::spawn(async move {
             let _ = outbound.shutdown().await;
@@ -70,6 +74,7 @@ impl Server {
             inbound.set_nodelay(false)?;
         }
 
+        dbg!("p2");
         // Noise: <- e, ee
         let mut pong = [0u8; 5 + 48]; // TODO: pad to some length
         pong[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30]);
@@ -79,6 +84,8 @@ impl Server {
         debug_assert_eq!(len, 48);
         // println!("S: e, ee w/ header {:x?}", &buf);
         inbound.write_all(&pong).await?;
+
+        dbg!("p3");
 
         let responder = responder
             .into_transport_mode()
