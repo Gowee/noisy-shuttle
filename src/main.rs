@@ -5,7 +5,7 @@ use structopt::StructOpt;
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::{lookup_host, TcpListener, TcpStream};
-use tracing::info;
+use tracing::{info, warn};
 
 use std::io;
 use std::net::SocketAddr;
@@ -49,10 +49,7 @@ pub async fn run_server(opt: SvrOpt) -> Result<()> {
         "server is up with remote: {}, camouflage: {}",
         opt.remote_addr, camouflage_addr
     );
-    let server = Arc::new(Server {
-        key: derive_psk(opt.key.as_bytes()),
-        camouflage_addr,
-    });
+    let server = Arc::new(Server::new(opt.key.as_bytes(), camouflage_addr, 1024));
     let opt = Arc::new(opt);
     let listener = TcpListener::bind(opt.listen_addr).await?;
     while let Ok((inbound, client_addr)) = listener.accept().await {
@@ -83,6 +80,27 @@ pub async fn handle_server_connection(
                 .map(|_| ())
         }
         Err(IoError(e)) => Err(e),
+        Err(ReplayDetected {
+            buf,
+            mut io,
+            nounce,
+            first_from,
+        }) => {
+            warn!(
+                "replay detected from {}, nonce: {:x?}, first from: {}",
+                &client_addr, &nounce, &first_from
+            );
+            info!(
+                "camouflage relay: {} -> {} (pooh's agent)",
+                &client_addr, &opt.camouflage_addr
+            );
+            // TODO: ban
+            let mut outbound = TcpStream::connect(&opt.camouflage_addr).await?;
+            outbound.write_all(&buf).await?;
+            tokio::io::copy_bidirectional(&mut io, &mut outbound)
+                .await
+                .map(|_| ())
+        }
         Err(Unauthenticated { buf, mut io }) => {
             // fallback to naive relay; TODO: option for strategy
             info!(

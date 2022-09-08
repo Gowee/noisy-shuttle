@@ -1,25 +1,38 @@
+use lru::LruCache;
 use rustls::{HandshakeType, ProtocolVersion};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
+use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Mutex;
 
 use super::common::{SnowyStream, NOISE_PARAMS, PSKLEN};
 
+use crate::common::derive_psk;
 use crate::utils::{
     get_server_tls_version, parse_tls_plain_message, read_tls_message, u16_from_slice,
     TlsMessageExt,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Server {
     pub key: [u8; PSKLEN],
     pub camouflage_addr: SocketAddr,
+    pub replay_filter: Mutex<LruCache<[u8; 32], SocketAddr>>, // TODO: TOTP; prevent DoS attack
 }
 
 impl Server {
+    pub fn new(key: &[u8], camouflage_addr: SocketAddr, replay_filter_size: usize) -> Self {
+        Server {
+            key: derive_psk(key),
+            camouflage_addr,
+            replay_filter: Mutex::new(LruCache::new(replay_filter_size)),
+        }
+    }
+
     pub async fn accept(&self, mut inbound: TcpStream) -> Result<SnowyStream, AcceptError> {
         use AcceptError::*;
 
@@ -29,18 +42,10 @@ impl Server {
             .build_responder()
             .expect("Valid NOISE params");
         let mut buf = Vec::new();
-        // match  {
-        //     Err(_e) => return Err(ClientHelloInvalid { buf, io: inbound }),
-        //     _ => {}
-        // };
-        // let msg = match read_tls_message(&mut inbound, &mut buf).await?.map_err(|_e| RustlsError::CorruptMessage).and_then(|_|parse_tls_plain_message(&buf)) {
-        //     Ok(msg) => msg,
-        //     Err(e) => return Err(ClientHelloInvalid { buf, io: inbound }),
-        // };
 
         // Noise: -> psk, e
         let mut psk_e = [0u8; 48];
-        let _tls1_3 = false;
+        // let _tls1_3 = false;
         match read_tls_message(&mut inbound, &mut buf)
             .await?
             .ok()
@@ -64,8 +69,20 @@ impl Server {
                 return Err(ClientHelloInvalid { buf, io: inbound });
             }
         }
-        if responder.read_message(&psk_e, &mut []).is_err() {
-            return Err(Unauthenticated { buf, io: inbound });
+        let e = psk_e[..32].try_into().unwrap();
+        {
+            let mut rf = self.replay_filter.lock().unwrap();
+            if let Some(&client_id) = rf.get(&e) {
+                return Err(ReplayDetected {
+                    buf,
+                    io: inbound,
+                    nounce: e,
+                    first_from: client_id,
+                });
+            }
+            responder.read_message(&psk_e, &mut []).is_err()
+                && return Err(Unauthenticated { buf, io: inbound });
+            rf.put(e, inbound.peer_addr().expect("TODO"));
         }
         dbg!("noise ping confirmed");
         // Ref: https://tls12.xargs.org/
@@ -74,25 +91,8 @@ impl Server {
         //   session id
         let mut outbound = TcpStream::connect(self.camouflage_addr).await?;
 
-        dbg!("p2");
-
         // forward Client Hello in whole to camouflage server
-        dbg!(buf.len());
-        dbg!(outbound.write_all(&buf).await?);
-        dbg!("tt");
-
-        // read_tls_message(&mut outbound, &mut buf).await?; // read camouflage Server Hello
-
-        // let msg = match parse_tls_plain_message(&buf) {
-        //     Ok(msg) => msg,
-        //     Err(e) => {
-        //         return Err(ServerHelloInvalid {
-        //             buf,
-        //             inbound,
-        //             outbound,
-        //         })
-        //     }
-        // };
+        outbound.write_all(&buf).await?;
 
         // read camouflage Server Hello
         let shp = match read_tls_message(&mut outbound, &mut buf)
@@ -156,17 +156,17 @@ impl Server {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
-pub enum Accept {
-    Established(SnowyStream),
-    Unauthenticated { buf: Vec<u8>, io: TcpStream },
-}
-
 pub enum AcceptError {
     IoError(io::Error),
     Unauthenticated {
         buf: Vec<u8>,
         io: TcpStream,
+    },
+    ReplayDetected {
+        buf: Vec<u8>,
+        io: TcpStream,
+        nounce: [u8; 32],
+        first_from: SocketAddr,
     },
     ClientHelloInvalid {
         buf: Vec<u8>,

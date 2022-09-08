@@ -11,7 +11,7 @@ use std::io;
 use std::sync::Arc;
 
 use crate::utils::parse_tls_plain_message;
-use crate::utils::read_and_parse_tls_plain_message;
+
 use crate::utils::{
     get_server_tls_version, read_tls_message, HandshakeStateExt, NoCertificateVerification,
     TlsMessageExt,
@@ -30,6 +30,7 @@ pub struct Client {
 }
 
 impl Client {
+    #[allow(clippy::uninit_vec)]
     pub async fn connect(&self, mut stream: TcpStream) -> io::Result<SnowyStream> {
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
@@ -63,9 +64,6 @@ impl Client {
         debug_assert!(!tlsconn.wants_write() & tlsconn.wants_read());
         stream.write_all(&buf).await?; // forward Client Hello
 
-        // read_tls_message(&mut stream, &mut buf)
-        //     .await?
-        //     .expect("TODO");
         // read Server Hello
         let shp = read_tls_message(&mut stream, &mut buf)
             .await?
