@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::client::Client;
 use crate::common::derive_psk;
 use crate::opt::{CltOpt, Opt, SvrOpt};
-use crate::server::{Accept, Server};
+use crate::server::Server;
 
 mod client;
 mod common;
@@ -73,15 +73,17 @@ pub async fn handle_server_connection(
     opt: Arc<SvrOpt>,
 ) -> io::Result<()> {
     info!("accepting connection from {}", &client_addr);
-    match server.accept(inbound).await? {
-        Accept::Established(mut snowys) => {
+    use crate::server::AcceptError::*;
+    match server.accept(inbound).await {
+        Ok(mut snowys) => {
             let mut outbound = TcpStream::connect(&opt.remote_addr).await?;
             info!("snowy relay: {} -> {}", &client_addr, &opt.remote_addr);
             tokio::io::copy_bidirectional(&mut snowys, &mut outbound)
                 .await
                 .map(|_| ())
         }
-        Accept::Unauthenticated { buf, mut io } => {
+        Err(IoError(e)) => Err(e),
+        Err(Unauthenticated { buf, mut io }) => {
             // fallback to naive relay; TODO: option for strategy
             info!(
                 "camouflage relay: {} -> {} (unauthenticated)",
@@ -92,6 +94,25 @@ pub async fn handle_server_connection(
             tokio::io::copy_bidirectional(&mut io, &mut outbound)
                 .await
                 .map(|_| ())
+        }
+        Err(ClientHelloInvalid { buf, mut io }) => {
+            // unrecognized client protocol, just relay it to camouflage for now
+            info!(
+                "camouflage relay: {} -> {} (client protocol unrecognized)",
+                &client_addr, &opt.camouflage_addr
+            );
+            let mut outbound = TcpStream::connect(&opt.camouflage_addr).await?;
+            outbound.write_all(&buf).await?;
+            tokio::io::copy_bidirectional(&mut io, &mut outbound)
+                .await
+                .map(|_| ())
+        }
+        Err(ServerHelloInvalid { .. }) => {
+            info!(
+                "invalid server hello received from {} when handling {}",
+                &opt.camouflage_addr, &client_addr
+            );
+            Ok(())
         }
     }
 }

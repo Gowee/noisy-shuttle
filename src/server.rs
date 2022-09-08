@@ -1,23 +1,16 @@
-use rustls::internal::msgs::codec::Reader;
-use rustls::internal::msgs::handshake::{
-    ClientExtension, HandshakeMessagePayload, HandshakePayload,
-};
-use rustls::internal::msgs::message::{Message, MessagePayload, OpaqueMessage};
-use rustls::Error as RustlsError;
-use rustls::ProtocolVersion;
+use rustls::{HandshakeType, ProtocolVersion};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
-use std::convert::TryFrom;
 use std::io;
 use std::net::SocketAddr;
 
-use super::common::{SnowyStream, NOISE_PARAMS, PSKLEN, TLS_RECORD_HEADER_LENGTH};
+use super::common::{SnowyStream, NOISE_PARAMS, PSKLEN};
 
 use crate::utils::{
-    get_client_hello_payload, get_client_tls_versions, get_server_hello_payload,
     get_server_tls_version, parse_tls_plain_message, read_tls_message, u16_from_slice,
+    TlsMessageExt,
 };
 
 #[derive(Debug, Clone)]
@@ -27,74 +20,104 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn accept(&self, mut inbound: TcpStream) -> io::Result<Accept> {
+    pub async fn accept(&self, mut inbound: TcpStream) -> Result<SnowyStream, AcceptError> {
+        use AcceptError::*;
+
         dbg!("acc init");
         let mut responder = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
             .build_responder()
             .expect("Valid NOISE params");
         let mut buf = Vec::new();
-        read_tls_message(&mut inbound, &mut buf).await?;
+        // match  {
+        //     Err(_e) => return Err(ClientHelloInvalid { buf, io: inbound }),
+        //     _ => {}
+        // };
+        // let msg = match read_tls_message(&mut inbound, &mut buf).await?.map_err(|_e| RustlsError::CorruptMessage).and_then(|_|parse_tls_plain_message(&buf)) {
+        //     Ok(msg) => msg,
+        //     Err(e) => return Err(ClientHelloInvalid { buf, io: inbound }),
+        // };
+
         // Noise: -> psk, e
         let mut psk_e = [0u8; 48];
-        let mut tls1_3 = false;
-        let msg = parse_tls_plain_message(&buf).expect("TODO: Client Hello invalid");
-        if let Some(chp) = get_client_hello_payload(&msg) {
-            chp.random.write_slice(&mut psk_e[..32]); // client random
-            let s: (usize, [u8; 32]) = chp.session_id.into();
-            psk_e[32..].copy_from_slice(&s.1[..16]); // session id
-                                                     // tls1_3 = get_client_tls_versions(chp)
-                                                     //     .map(|vers| {
-                                                     //         vers.iter()
-                                                     //             .cloned()
-                                                     //             .any(|ver| ver == ProtocolVersion::TLSv1_3)
-                                                     //     })
-                                                     //     .unwrap_or(false);
-        } else {
-            unimplemented!();
+        let _tls1_3 = false;
+        match read_tls_message(&mut inbound, &mut buf)
+            .await?
+            .ok()
+            .and_then(|_| parse_tls_plain_message(&buf).ok())
+            .filter(|msg| msg.is_handshake_type(HandshakeType::ClientHello))
+            .and_then(|msg| msg.into_client_hello_payload())
+        {
+            Some(chp) => {
+                chp.random.write_slice(&mut psk_e[..32]); // client random
+                let s: (usize, [u8; 32]) = chp.session_id.into();
+                psk_e[32..].copy_from_slice(&s.1[..16]); // session id
+
+                // tls1_3 = get_client_tls_versions(chp)
+                //     .map(|vers| {
+                //         vers.iter()
+                //             .any(|&ver| ver == ProtocolVersion::TLSv1_3)
+                //     })
+                //     .unwrap_or(false);
+            }
+            None => {
+                return Err(ClientHelloInvalid { buf, io: inbound });
+            }
         }
         if responder.read_message(&psk_e, &mut []).is_err() {
-            return Ok(Accept::Unauthenticated {
-                buf: buf.into(),
-                io: inbound,
-            });
+            return Err(Unauthenticated { buf, io: inbound });
         }
         dbg!("noise ping confirmed");
         // Ref: https://tls12.xargs.org/
         //      https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L88
         //   record header + handshake header + server version + server random + session id len +
         //   session id
-        // Noise: -> psk, e
-        // let mut psk_e = [0u8; 48];
-        // psk_e[..32].copy_from_slice(&msg[5 + 4 + 2..11 + 32]); // client random
-        // psk_e[32..].copy_from_slice(&msg[ping.len() - 32..ping.len() - 16]); // session id
-        dbg!("p0");
-        // println!("S: e, psk {:x?}", &psk_e[..48]);
-        // if responder.read_message(&psk_e, &mut []).is_err() {
-        //     return Ok(Accept::Unauthenticated {
-        //         buf: ping.into(),
-        //         io: inbound,
-        //     });
-        // }
         let mut outbound = TcpStream::connect(self.camouflage_addr).await?;
 
         dbg!("p2");
 
-        // extract remaining part of client hello and send CH in whole to camouflage server
-        // let msglen = u16_from_slice(&ping[3..5]) as usize;
-        // let mut msgbuf = vec![0; msglen - (4 + 2 + 32 + 1 + 32)];
-        // inbound.read_exact(&mut msgbuf).await?;
-        // // TODO: write once
-        outbound.write_all(&buf).await?;
+        // forward Client Hello in whole to camouflage server
+        dbg!(buf.len());
+        dbg!(outbound.write_all(&buf).await?);
+        dbg!("tt");
 
-        read_tls_message(&mut outbound, &mut buf).await?; // read camouflage Server Hello
+        // read_tls_message(&mut outbound, &mut buf).await?; // read camouflage Server Hello
 
-        let msg = parse_tls_plain_message(&buf).expect("TODO: Camouflage Server Hello Invalid");
-        if let Some(shp) = get_server_hello_payload(&msg) {
-            inbound.write_all(&buf).await?;
-            if get_server_tls_version(shp) == Some(ProtocolVersion::TLSv1_3) {
+        // let msg = match parse_tls_plain_message(&buf) {
+        //     Ok(msg) => msg,
+        //     Err(e) => {
+        //         return Err(ServerHelloInvalid {
+        //             buf,
+        //             inbound,
+        //             outbound,
+        //         })
+        //     }
+        // };
+
+        // read camouflage Server Hello
+        let shp = match read_tls_message(&mut outbound, &mut buf)
+            .await?
+            .ok()
+            .and_then(|_| parse_tls_plain_message(&buf).ok())
+            .filter(|msg| msg.is_handshake_type(HandshakeType::ServerHello))
+            .and_then(|msg| msg.into_server_hello_payload())
+        {
+            Some(shp) => shp,
+            None => {
+                return Err(ServerHelloInvalid {
+                    buf,
+                    inbound,
+                    outbound,
+                });
+            }
+        };
+
+        inbound.write_all(&buf).await?;
+        match get_server_tls_version(&shp) {
+            Some(ProtocolVersion::TLSv1_3) => {
                 // TLS 1.3: handshake done
-            } else {
+            }
+            _ => {
                 // TLS 1.2: continue handshake
                 relay_until_handshake_finished(&mut inbound, &mut outbound).await?;
                 // force flush TCP before sending e, ee in a dirty way; TODO: fix client
@@ -129,7 +152,7 @@ impl Server {
             .into_transport_mode()
             .expect("NOISE handshake finished");
         // let len = responder.write_message(b"pong", &mut buf).unwrap(); // message being &mut [] resulted in mysterious Decrypt error
-        Ok(Accept::Established(SnowyStream::new(inbound, responder)))
+        Ok(SnowyStream::new(inbound, responder))
     }
 }
 
@@ -137,6 +160,29 @@ impl Server {
 pub enum Accept {
     Established(SnowyStream),
     Unauthenticated { buf: Vec<u8>, io: TcpStream },
+}
+
+pub enum AcceptError {
+    IoError(io::Error),
+    Unauthenticated {
+        buf: Vec<u8>,
+        io: TcpStream,
+    },
+    ClientHelloInvalid {
+        buf: Vec<u8>,
+        io: TcpStream,
+    },
+    ServerHelloInvalid {
+        buf: Vec<u8>,
+        inbound: TcpStream,
+        outbound: TcpStream,
+    },
+}
+
+impl From<io::Error> for AcceptError {
+    fn from(err: io::Error) -> Self {
+        Self::IoError(err)
+    }
 }
 
 async fn copy_until_handshake_finished<'a>(

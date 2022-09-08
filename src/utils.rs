@@ -3,9 +3,9 @@ use rustls::internal::msgs::handshake::{
     ClientExtension, ClientHelloPayload, HandshakeMessagePayload, HandshakePayload,
     ServerExtension, ServerHelloPayload,
 };
-use rustls::internal::msgs::message::MessageError;
-use rustls::internal::msgs::message::{Message, MessagePayload, OpaqueMessage};
-use rustls::{Error as RustlsError, ProtocolVersion};
+
+use rustls::internal::msgs::message::{Message, MessageError, MessagePayload, OpaqueMessage};
+use rustls::{ContentType, Error as RustlsError, ProtocolVersion};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tokio::{self};
 
@@ -14,7 +14,7 @@ use std::io::{self, Read};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::common::TLS_RECORD_HEADER_LENGTH;
+use crate::common::{MAXIMUM_CIPHERTEXT_LENGTH, TLS_RECORD_HEADER_LENGTH};
 
 pub fn u16_from_slice(s: &[u8]) -> u16 {
     u16::from_be_bytes(<[u8; 2]>::try_from(s).unwrap())
@@ -87,10 +87,41 @@ impl<'a, 'b, T: AsyncRead + Unpin> Read for SyncReadAdapter<'a, 'b, T> {
 }
 
 /// Read a single TLS message into a Vec.
-pub async fn read_tls_message(mut r: impl AsyncRead + Unpin, buf: &mut Vec<u8>) -> io::Result<()> {
-    let mut header = [0xffu8; TLS_RECORD_HEADER_LENGTH];
+pub async fn read_tls_message(
+    mut r: impl AsyncRead + Unpin,
+    buf: &mut Vec<u8>,
+) -> io::Result<Result<(), MessageError>> {
+    let mut header = [0xefu8; TLS_RECORD_HEADER_LENGTH];
+    dbg!("k1");
     r.read_exact(&mut header).await?;
+    dbg!("k2");
+    let typ = ContentType::from(header[0]);
+    let ver = ProtocolVersion::from(u16_from_slice(&header[1..3]));
     let len = u16_from_slice(&header[3..5]) as usize;
+    // Copied from: https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L87
+    // Reject undersize messages
+    //  implemented per section 5.1 of RFC8446 (TLSv1.3)
+    //              per section 6.2.1 of RFC5246 (TLSv1.2)
+    if typ != ContentType::ApplicationData && len == 0 {
+        return Ok(Err(MessageError::IllegalLength));
+    }
+    // Reject oversize messages
+    if len >= MAXIMUM_CIPHERTEXT_LENGTH {
+        return Ok(Err(MessageError::IllegalLength));
+    }
+    // Don't accept any new content-types.
+    if let ContentType::Unknown(_) = typ {
+        return Ok(Err(MessageError::IllegalContentType));
+    }
+    match ver {
+        // actually TLS 1.1 should never be present; TLS1.0 may be present as a compatiblity trick
+        ProtocolVersion::TLSv1_0
+        | ProtocolVersion::TLSv1_1
+        | ProtocolVersion::TLSv1_2
+        | ProtocolVersion::TLSv1_3 => {}
+        _ => return Ok(Err(MessageError::IllegalProtocolVersion)),
+    }
+
     println!("{:x?}", header);
     dbg!(len);
     buf.reserve_exact((TLS_RECORD_HEADER_LENGTH + len).max(buf.len()) - buf.len());
@@ -99,46 +130,63 @@ pub async fn read_tls_message(mut r: impl AsyncRead + Unpin, buf: &mut Vec<u8>) 
     dbg!("ra");
     r.read_exact(&mut buf[TLS_RECORD_HEADER_LENGTH..]).await?;
     dbg!("rb");
-    Ok(())
+    Ok(Ok(()))
 }
 
 pub fn parse_tls_plain_message(buf: &[u8]) -> Result<Message, RustlsError> {
     println!("{:x?}", buf);
-    OpaqueMessage::read(&mut Reader::init(&buf))
+    OpaqueMessage::read(&mut Reader::init(buf))
         .map(|om| om.into_plain_message())
-        .map_err(|e| RustlsError::CorruptMessage) // invalid header
-        .and_then(|pm| Message::try_from(pm))
+        .map_err(|_e| RustlsError::CorruptMessage) // invalid header
+        .and_then(Message::try_from)
 }
 
-pub fn get_client_hello_payload(msg: &Message) -> Option<&ClientHelloPayload> {
-    if let MessagePayload::Handshake {
-        parsed:
-            HandshakeMessagePayload {
-                payload: HandshakePayload::ClientHello(ref chp),
-                ..
-            },
-        ..
-    } = msg.payload
-    {
-        Some(chp)
-    } else {
-        None
+pub async fn read_and_parse_tls_plain_message(
+    r: impl AsyncRead + Unpin,
+) -> io::Result<Result<Message, RustlsError>> {
+    let mut buf = Vec::new();
+    Ok(read_tls_message(r, &mut buf)
+        .await?
+        .map_err(|_e| RustlsError::CorruptMessage)
+        .and_then(|_| parse_tls_plain_message(&buf)))
+}
+
+pub trait TlsMessageExt {
+    fn into_client_hello_payload(self) -> Option<ClientHelloPayload>;
+    fn into_server_hello_payload(self) -> Option<ServerHelloPayload>;
+}
+
+impl TlsMessageExt for Message {
+    fn into_client_hello_payload(self) -> Option<ClientHelloPayload> {
+        if let MessagePayload::Handshake {
+            parsed:
+                HandshakeMessagePayload {
+                    payload: HandshakePayload::ClientHello(chp),
+                    ..
+                },
+            ..
+        } = self.payload
+        {
+            Some(chp)
+        } else {
+            None
+        }
     }
-}
 
-pub fn get_server_hello_payload(msg: &Message) -> Option<&ServerHelloPayload> {
-    if let MessagePayload::Handshake {
-        parsed:
-            HandshakeMessagePayload {
-                payload: HandshakePayload::ServerHello(ref shp),
-                ..
-            },
-        ..
-    } = msg.payload
-    {
-        Some(shp)
-    } else {
-        None
+    fn into_server_hello_payload(self) -> Option<ServerHelloPayload> {
+        if let MessagePayload::Handshake {
+            parsed:
+                HandshakeMessagePayload {
+                    payload: HandshakePayload::ServerHello(shp),
+                    ..
+                },
+            ..
+        } = self.payload
+        {
+            Some(shp)
+        } else {
+            None
+        }
     }
 }
 
