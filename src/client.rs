@@ -79,7 +79,7 @@ impl Client {
             Some(ProtocolVersion::TLSv1_3) => {
                 // TLS 1.3: handshake treated as done
                 // TODO: send mibble box compatibility CCS?
-                dbg!("tls13 hs done");
+                // dbg!("tls13 hs done");
             }
             _ => {
                 // conitnue full handshake via rustls
@@ -91,7 +91,7 @@ impl Client {
                     })
                     .await?
                     .into_inner();
-                dbg!("tls12 hs done");
+                // dbg!("tls12 hs done");
                 stream = Some(socket);
             }
         }
@@ -110,7 +110,7 @@ impl Client {
         initiator
             .read_message(&e_ee, &mut [])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?; // TODO: allow recovery?
-        dbg!("noise hs done");
+                                                                          // dbg!("noise hs done");
         let noise = initiator
             .into_transport_mode()
             .expect("NOISE handshake finished");

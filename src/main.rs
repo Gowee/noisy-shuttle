@@ -10,7 +10,7 @@ use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::time::{sleep, Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use std::io;
 use std::net::SocketAddr;
@@ -27,11 +27,8 @@ mod opt;
 mod server;
 mod utils;
 
-const PREFLIGHT: usize = 16;
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    // env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
     tracing_subscriber::fmt::init();
 
     let opt = Opt::from_args();
@@ -142,17 +139,17 @@ pub async fn handle_server_connection(
 
 pub async fn run_client(opt: CltOpt) -> Result<()> {
     info!(
-        "client is up with remote: {}, sni: {}",
-        &opt.remote_addr, &opt.sni
+        "client is up with remote: {}, sni: {}, preflight: {}",
+        &opt.remote_addr, &opt.server_name, opt.preflight
     );
     let client = Arc::new(Client {
         key: derive_psk(opt.key.as_bytes()),
-        server_name: opt.sni.as_str().try_into().unwrap(),
+        server_name: opt.server_name.as_str().try_into().unwrap(),
     });
     let opt = Arc::new(opt);
 
-    let mut rx = if PREFLIGHT > 0 {
-        let (tx, rx) = mpsc::channel(PREFLIGHT);
+    let mut rx = if opt.preflight > 0 {
+        let (tx, rx) = mpsc::channel(opt.preflight);
         tokio::spawn(preflight(client.clone(), opt.remote_addr.clone(), tx));
         Some(rx)
     } else {
@@ -176,8 +173,11 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
                 };
                 e
             })
-            .ok();
-        // .filter(|(s, _t)| s.poll_write_ready() == Poll::Ready(Ok(())));
+            .ok()
+            .filter(|(s, _t)| match s.as_inner().try_write(&mut []) {
+                Ok(_) => true,
+                Err(e) => e.kind() == io::ErrorKind::WouldBlock,
+            });
         tokio::spawn(async move {
             let mut snowys = match preflighted {
                 Some((s, t)) => {
@@ -202,7 +202,29 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
                     s
                 }
             };
-            tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await
+            let now = Instant::now();
+            match tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await {
+                Ok((a, b)) => {
+                    info!(
+                        "relay {} -> {} finished after {} s  with {},{} b transfered",
+                        &client_addr,
+                        &opt.remote_addr,
+                        now.elapsed().as_millis() as f64 / 1000.0,
+                        a,
+                        b
+                    );
+                }
+                Err(e) => {
+                    info!(
+                        "relay {} -> {} terminated after {} s with error: {} ",
+                        &client_addr,
+                        &opt.remote_addr,
+                        now.elapsed().as_millis() as f64 / 1000.0,
+                        e,
+                    );
+                }
+            }
+            Ok::<(), io::Error>(())
         });
     }
     Ok(())
@@ -220,7 +242,7 @@ pub async fn preflight(
             .await
         {
             Ok(snowys) => {
-                info!(
+                debug!(
                     "preflighted one connection within {} ms",
                     now.elapsed().as_millis()
                 );

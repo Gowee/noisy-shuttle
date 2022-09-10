@@ -52,10 +52,18 @@ impl SnowyStream {
             write_offset: 0,
         }
     }
+
+    pub fn as_inner(&self) -> &TcpStream {
+        &self.socket
+    }
+
+    pub fn as_inner_mut(&mut self) -> &mut TcpStream {
+        &mut self.socket
+    }
 }
 
 impl fmt::Debug for SnowyStream {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+    fn fmt(&self, _fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         unimplemented!();
     }
 }

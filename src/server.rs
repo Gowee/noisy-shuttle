@@ -5,7 +5,7 @@ use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
 use std::io;
-use std::mem;
+
 use std::net::SocketAddr;
 use std::sync::Mutex;
 
