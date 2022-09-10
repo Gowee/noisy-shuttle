@@ -8,7 +8,8 @@ use tokio::net::TcpStream;
 
 use futures::ready;
 use std::cmp;
-use std::io::{self, Result};
+use std::fmt;
+use std::io::{self};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -24,8 +25,9 @@ pub const MAXIMUM_CIPHERTEXT_LENGTH: usize = u16::MAX as usize; // show::constan
 pub const AEAD_TAG_LENGTH: usize = 16; // show::constants::TAGLEN
 pub const MAXIMUM_PLAINTEXT_LENGTH: usize = MAXIMUM_CIPHERTEXT_LENGTH - AEAD_TAG_LENGTH;
 pub const PSKLEN: usize = 32; // snow::constants::PSKLEN;
-const SALT: &[u8] = b"the secure tunnel under snow";
+const CONTEXT: &[u8] = b"the secure tunnel under snow";
 
+// #[derive(Debug)]
 pub struct SnowyStream {
     pub(crate) socket: TcpStream,
     pub(crate) noise: TransportState,
@@ -52,12 +54,18 @@ impl SnowyStream {
     }
 }
 
+impl fmt::Debug for SnowyStream {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        unimplemented!();
+    }
+}
+
 impl AsyncRead for SnowyStream {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
-    ) -> Poll<Result<()>> {
+    ) -> Poll<io::Result<()>> {
         if !self.state.readable() {
             return Poll::Ready(Ok(()));
         }
@@ -190,13 +198,10 @@ impl AsyncWrite for SnowyStream {
                 )
                 .unwrap();
             offset += len;
-            // assert!(offset < buf.len());
+            debug_assert!(offset < buf.len());
             this.write_buffer[3..5].copy_from_slice(&(n as u16).to_be_bytes());
-            // dbg!(len, &(len as u16).to_be_bytes());
             this.write_buffer.truncate(TLS_RECORD_HEADER_LENGTH + n);
-            // println!("W {:x?}", this.write_buffer);
         }
-        // Poll::Ready(Ok(offset))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -270,8 +275,9 @@ impl SnowyState {
 }
 
 pub fn derive_psk(key: &[u8]) -> [u8; PSKLEN] {
+    // Blake3 defines a key derive function, but blake2 does not.
     let mut h = Blake2s256::new();
-    h.update(SALT);
+    h.update(CONTEXT);
     h.update(key);
     h.finalize().into()
 }

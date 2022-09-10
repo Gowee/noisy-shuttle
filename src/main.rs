@@ -1,10 +1,15 @@
 #![warn(rust_2018_idioms)]
 
 use anyhow::Result;
+use common::SnowyStream;
 use structopt::StructOpt;
 
+use futures::TryFutureExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{lookup_host, TcpListener, TcpStream};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::time::{sleep, Duration, Instant};
 use tracing::{info, warn};
 
 use std::io;
@@ -21,6 +26,8 @@ mod common;
 mod opt;
 mod server;
 mod utils;
+
+const PREFLIGHT: usize = 16;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -57,7 +64,7 @@ pub async fn run_server(opt: SvrOpt) -> Result<()> {
         let opt = opt.clone();
         tokio::spawn(async move {
             let r = handle_server_connection(server, inbound, client_addr, opt).await;
-            info!("relay done: {:?}", r);
+            info!("relay done with {}: {:?}", &client_addr, r);
         });
     }
     Ok(())
@@ -102,7 +109,6 @@ pub async fn handle_server_connection(
                 .map(|_| ())
         }
         Err(Unauthenticated { buf, mut io }) => {
-            // fallback to naive relay; TODO: option for strategy
             info!(
                 "camouflage relay: {} -> {} (unauthenticated)",
                 &client_addr, &opt.camouflage_addr
@@ -114,7 +120,6 @@ pub async fn handle_server_connection(
                 .map(|_| ())
         }
         Err(ClientHelloInvalid { buf, mut io }) => {
-            // unrecognized client protocol, just relay it to camouflage for now
             info!(
                 "camouflage relay: {} -> {} (client protocol unrecognized)",
                 &client_addr, &opt.camouflage_addr
@@ -146,18 +151,87 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     });
     let opt = Arc::new(opt);
 
+    let mut rx = if PREFLIGHT > 0 {
+        let (tx, rx) = mpsc::channel(PREFLIGHT);
+        tokio::spawn(preflight(client.clone(), opt.remote_addr.clone(), tx));
+        Some(rx)
+    } else {
+        None
+    };
+
     let listener = TcpListener::bind(opt.listen_addr).await?;
 
     while let Ok((mut inbound, client_addr)) = listener.accept().await {
         let client = client.clone();
         let opt = opt.clone();
         info!("accpeting connection from: {}", client_addr);
+        // preflighter is not fast enough to cover all requests
+        let preflighted = rx
+            .as_mut()
+            .ok_or(TryRecvError::Empty)
+            .and_then(|rx| rx.try_recv())
+            .map_err(|e| {
+                if e == TryRecvError::Disconnected {
+                    panic!("Preflighter termintated unexpectedly")
+                };
+                e
+            })
+            .ok();
+        // .filter(|(s, _t)| s.poll_write_ready() == Poll::Ready(Ok(())));
         tokio::spawn(async move {
-            let outbound = TcpStream::connect(&opt.remote_addr).await?;
-            info!("snowy relay {} -> {}", &client_addr, &opt.remote_addr);
-            let mut snowys = client.connect(outbound).await?;
+            let mut snowys = match preflighted {
+                Some((s, t)) => {
+                    info!(
+                        "snowy relay {} -> {} (preflighted {} s ago)",
+                        &client_addr,
+                        &opt.remote_addr,
+                        t.elapsed().as_millis() as f64 / 1000.0
+                    );
+                    s
+                }
+                None => {
+                    let now = Instant::now();
+                    let outbound = TcpStream::connect(&opt.remote_addr).await?;
+                    let s = client.connect(outbound).await?;
+                    info!(
+                        "snowy relay {} -> {} (handshaked within {} ms)",
+                        &client_addr,
+                        &opt.remote_addr,
+                        now.elapsed().as_millis()
+                    );
+                    s
+                }
+            };
             tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await
         });
     }
     Ok(())
+}
+
+pub async fn preflight(
+    client: Arc<Client>,
+    remote_addr: String,
+    tx: mpsc::Sender<(SnowyStream, Instant)>,
+) -> io::Result<()> {
+    loop {
+        let now = Instant::now();
+        match TcpStream::connect(&remote_addr)
+            .and_then(|s| client.connect(s))
+            .await
+        {
+            Ok(snowys) => {
+                info!(
+                    "preflighted one connection within {} ms",
+                    now.elapsed().as_millis()
+                );
+                tx.send((snowys, Instant::now()))
+                    .await
+                    .expect("Main task running");
+            }
+            Err(e) => {
+                warn!("preflighter paused for a while due to: {}", e);
+                sleep(Duration::from_secs(3)).await;
+            }
+        }
+    }
 }

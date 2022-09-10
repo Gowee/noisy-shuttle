@@ -60,7 +60,6 @@ impl Client {
         unsafe { buf.set_len(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH) };
         let len = tlsconn.write_tls(&mut io::Cursor::new(&mut buf))?; // Write for Vec is dummy?
         unsafe { buf.set_len(len) };
-        println!("{} {:x?}", len, &buf);
         debug_assert!(!tlsconn.wants_write() & tlsconn.wants_read());
         stream.write_all(&buf).await?; // forward Client Hello
 
@@ -108,11 +107,10 @@ impl Client {
         let e_ee: [u8; 48] = pong[5..]
             .try_into()
             .map_err(|_e| io::Error::new(io::ErrorKind::InvalidData, "Server not snowy"))?;
-        dbg!("noise hs done");
-
         initiator
             .read_message(&e_ee, &mut [])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?; // TODO: allow recovery?
+        dbg!("noise hs done");
         let noise = initiator
             .into_transport_mode()
             .expect("NOISE handshake finished");

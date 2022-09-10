@@ -92,9 +92,7 @@ pub async fn read_tls_message(
     buf: &mut Vec<u8>,
 ) -> io::Result<Result<(), MessageError>> {
     let mut header = [0xefu8; TLS_RECORD_HEADER_LENGTH];
-    dbg!("k1");
     r.read_exact(&mut header).await?;
-    dbg!("k2");
     let typ = ContentType::from(header[0]);
     let ver = ProtocolVersion::from(u16_from_slice(&header[1..3]));
     let len = u16_from_slice(&header[3..5]) as usize;
@@ -122,19 +120,14 @@ pub async fn read_tls_message(
         _ => return Ok(Err(MessageError::IllegalProtocolVersion)),
     }
 
-    println!("{:x?}", header);
-    dbg!(len);
     buf.reserve_exact((TLS_RECORD_HEADER_LENGTH + len).max(buf.len()) - buf.len());
     unsafe { buf.set_len(TLS_RECORD_HEADER_LENGTH + len) };
     buf[..TLS_RECORD_HEADER_LENGTH].copy_from_slice(&header);
-    dbg!("ra");
     r.read_exact(&mut buf[TLS_RECORD_HEADER_LENGTH..]).await?;
-    dbg!("rb");
     Ok(Ok(()))
 }
 
 pub fn parse_tls_plain_message(buf: &[u8]) -> Result<Message, RustlsError> {
-    println!("{:x?}", buf);
     OpaqueMessage::read(&mut Reader::init(buf))
         .map(|om| om.into_plain_message())
         .map_err(|_e| RustlsError::CorruptMessage) // invalid header

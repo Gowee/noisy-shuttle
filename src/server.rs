@@ -4,8 +4,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
-use std::collections::HashMap;
 use std::io;
+use std::mem;
 use std::net::SocketAddr;
 use std::sync::Mutex;
 
@@ -45,7 +45,6 @@ impl Server {
 
         // Noise: -> psk, e
         let mut psk_e = [0u8; 48];
-        // let _tls1_3 = false;
         match read_tls_message(&mut inbound, &mut buf)
             .await?
             .ok()
@@ -58,7 +57,7 @@ impl Server {
                 let s: (usize, [u8; 32]) = chp.session_id.into();
                 psk_e[32..].copy_from_slice(&s.1[..16]); // session id
 
-                // tls1_3 = get_client_tls_versions(chp)
+                // client_tls1_3 = get_client_tls_versions(chp)
                 //     .map(|vers| {
                 //         vers.iter()
                 //             .any(|&ver| ver == ProtocolVersion::TLSv1_3)
@@ -80,8 +79,9 @@ impl Server {
                     first_from: client_id,
                 });
             }
-            responder.read_message(&psk_e, &mut []).is_err()
-                && return Err(Unauthenticated { buf, io: inbound });
+            if responder.read_message(&psk_e, &mut []).is_err() {
+                return Err(Unauthenticated { buf, io: inbound });
+            }
             rf.put(e, inbound.peer_addr().expect("TODO"));
         }
         dbg!("noise ping confirmed");
@@ -111,7 +111,7 @@ impl Server {
                 });
             }
         };
-
+        // forward camouflage server hello back to client
         inbound.write_all(&buf).await?;
         match get_server_tls_version(&shp) {
             Some(ProtocolVersion::TLSv1_3) => {
