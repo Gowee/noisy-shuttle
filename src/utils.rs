@@ -7,9 +7,11 @@ use rustls::internal::msgs::handshake::{
 use rustls::internal::msgs::message::{Message, MessageError, MessagePayload, OpaqueMessage};
 use rustls::{ContentType, Error as RustlsError, ProtocolVersion};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
+use tokio::time::Duration;
 use tokio::{self};
 
 use std::convert::TryFrom;
+use std::fmt::{self, Display};
 use std::io::{self, Read};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -208,6 +210,47 @@ pub fn get_client_tls_versions(shp: &ClientHelloPayload) -> Option<&Vec<Protocol
             }
         })
         .next()
+}
+
+pub trait DurationExt {
+    fn autofmt<'a>(&'a self) -> DurationAutoFormatter<'a>;
+}
+
+impl DurationExt for Duration {
+    fn autofmt<'a>(&'a self) -> DurationAutoFormatter<'a> {
+        DurationAutoFormatter(self)
+    }
+}
+
+pub struct DurationAutoFormatter<'a>(pub &'a Duration);
+
+impl<'a> Display for DurationAutoFormatter<'a> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let t = self.0.as_nanos();
+        match t {
+            t if t < 1000 => {
+                write!(fmt, "{:.3}ns", t)
+            }
+            t if t < 1000_000 => {
+                write!(fmt, "{:.3}µs", t as f64 / 1000.0)
+            }
+            t if t < 1000_000_000 => {
+                write!(fmt, "{:.3}ms", t as f64 / 1000_000.0)
+            }
+            t if t < 1000_000_000_000 => {
+                write!(fmt, "{:.3}s", t as f64 / 1000_000_000.0)
+            }
+            t if t < 60_000_000_000_000 => {
+                write!(fmt, "{:.3}mins", t as f64 / 1000_000_000_000.0)
+            }
+            t if t < 3600_000_000_000_000 => {
+                write!(fmt, "{:.3}hrs", t / 60_000_000_000_000)
+            }
+            t /* if t < 24 * 3600_000_000_000_000 */ => {
+                write!(fmt, "{:.3}days", t / 3600_000_000_000_000)
+            }
+        }
+    }
 }
 
 // // https://stackoverflow.com/a/72461302/5488616
