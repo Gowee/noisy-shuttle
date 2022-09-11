@@ -9,8 +9,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration, Instant};
-use tracing::{debug, info, warn, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use std::io;
 use std::net::SocketAddr;
@@ -150,10 +151,10 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     });
     let opt = Arc::new(opt);
 
-    let mut txrx = if opt.preflight > 0 {
-        let (tx, rx) = mpsc::channel::<(SnowyStream, Instant)>(opt.preflight);
-        // tokio::spawn(preflight(client.clone(), opt.remote_addr.clone(), tx));
-        Some((tx, rx))
+    let mut rx = if opt.preflight > 0 {
+        let (tx, rx) = mpsc::channel::<(_, _)>(opt.preflight);
+        tokio::spawn(preflight(client.clone(), opt.remote_addr.clone(), tx));
+        Some(rx)
     } else {
         None
     };
@@ -165,42 +166,32 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
         let opt = opt.clone();
         // info!("acccepting connection from: {}", client_addr);
         // preflighter is not fast enough to cover all requests
-        let preflighted = txrx
+        let preflighted = rx
             .as_mut()
             .ok_or(TryRecvError::Empty)
-            .and_then(|(tx, rx)| rx.try_recv())
+            .and_then(|rx| rx.try_recv())
             .map_err(|e| {
                 if e == TryRecvError::Disconnected {
                     panic!("Preflighter termintated unexpectedly")
                 };
                 e
             })
-            .ok()
-            .filter(|(s, _t)| match s.as_inner().try_write(&mut []) {
-                Ok(_) => true,
-                Err(e) => e.kind() == io::ErrorKind::WouldBlock,
-            });
-        if preflighted.is_some() { 
-            let client = client.clone();
-            let tx = txrx.as_ref().unwrap().0.clone();
-            let remote_addr = opt.remote_addr.clone();
-            tokio::spawn(async move {
-                match TcpStream::connect(&remote_addr)
-                .and_then(|s| client.connect(s))
-                .await {
-                    Ok(snowys) => tx.send((snowys, Instant::now())).await.unwrap(),
-                    Err(_) => {}
-                };
-            });
-        }
+            .ok();
+        // .filter(|(s, _t)| match s.as_inner().try_write(&mut []) {
+        //     Ok(_) => true,
+        //     Err(e) => e.kind() == io::ErrorKind::WouldBlock,
+        // });
         tokio::spawn(async move {
             let mut snowys = match preflighted {
                 Some((s, t)) => {
+                    let tt = Instant::now();
+                    let s = s.await??;
                     info!(
-                        "snowy relay {} -> {} (preflighted {} ago)",
+                        "snowy relay {} -> {} (preflighted {} ago, ready within {})",
                         &client_addr,
                         &opt.remote_addr,
-                        t.elapsed().autofmt()
+                        t.elapsed().autofmt(),
+                        tt.elapsed().autofmt()
                     );
                     s
                 }
@@ -246,27 +237,34 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
 pub async fn preflight(
     client: Arc<Client>,
     remote_addr: String,
-    tx: mpsc::Sender<(SnowyStream, Instant)>,
+    tx: mpsc::Sender<(JoinHandle<io::Result<SnowyStream>>, Instant)>,
 ) -> io::Result<()> {
     loop {
         let now = Instant::now();
-        match TcpStream::connect(&remote_addr)
-            .and_then(|s| client.connect(s))
-            .await
-        {
-            Ok(snowys) => {
-                debug!(
-                    "preflighted one connection within {}",
-                    now.elapsed().as_millis()
-                );
-                tx.send((snowys, Instant::now()))
-                    .await
-                    .expect("Main task running");
-            }
-            Err(e) => {
-                warn!("preflighter paused for a while due to: {}", e);
-                sleep(Duration::from_secs(3)).await;
-            }
-        }
+        let remote_addr = remote_addr.clone();
+        let client = client.clone();
+        let conn = tokio::spawn(async move {
+            let s = TcpStream::connect(remote_addr).await?;
+            client.connect(s).await
+        });
+        tx.send((conn, now)).await.expect("Main task running");
+        // match TcpStream::connect(&remote_addr)
+        //     .and_then(|s| client.connect(s))
+        //     .await
+        // {
+        //     Ok(snowys) => {
+        //         debug!(
+        //             "preflighted one connection within {}",
+        //             now.elapsed().as_millis()
+        //         );
+        //         tx.send((snowys, Instant::now()))
+        //             .await
+        //             .expect("Main task running");
+        //     }
+        //     Err(e) => {
+        //         warn!("preflighter paused for a while due to: {}", e);
+        //         sleep(Duration::from_secs(3)).await;
+        //     }
+        // }
     }
 }
