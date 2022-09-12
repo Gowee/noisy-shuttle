@@ -265,3 +265,13 @@ impl<'a> Display for DurationAutoFormatter<'a> {
 //         result.assume_init()
 //     }
 // }
+
+// trait ExponentialMovingAverage {
+//     fn ema(&self, coeff: f64) -> Duration;
+// }
+
+// impl ExponentialMovingAverage for Duration {
+//     fn ema(&self, coeff: f64) -> Duration {
+//         self.as_nanos() * coeff
+//     }
+// }

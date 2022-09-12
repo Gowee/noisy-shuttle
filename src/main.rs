@@ -4,6 +4,7 @@ use anyhow::Result;
 use common::SnowyStream;
 use structopt::StructOpt;
 
+use deadqueue::resizable::Queue;
 use futures::TryFutureExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{lookup_host, TcpListener, TcpStream};
@@ -13,9 +14,11 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration, Instant};
 use tracing::{debug, info, instrument, warn};
 
+use std::cmp;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::ops::{Bound, RangeBounds};
+use std::sync::{Arc, Mutex};
 
 use crate::client::Client;
 use crate::common::derive_psk;
@@ -28,6 +31,9 @@ mod common;
 mod opt;
 mod server;
 mod utils;
+
+const CONNIDLE: usize = 30; // in secs
+const EMA_COEFF: f32 = 1.0 / 3.0;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -142,7 +148,7 @@ pub async fn handle_server_connection(
 
 pub async fn run_client(opt: CltOpt) -> Result<()> {
     info!(
-        "client is up with remote: {}, sni: {}, preflight: {}",
+        "client is up with remote: {}, sni: {}, preflight: {:#?}",
         &opt.remote_addr, &opt.server_name, opt.preflight
     );
     let client = Arc::new(Client {
@@ -151,12 +157,22 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     });
     let opt = Arc::new(opt);
 
-    let mut rx = if opt.preflight > 0 {
-        let (tx, rx) = mpsc::channel::<(_, _)>(opt.preflight);
-        tokio::spawn(preflight(client.clone(), opt.remote_addr.clone(), tx));
-        Some(rx)
-    } else {
-        None
+    let preflighter = match opt.preflight {
+        (0, Some(0)) => None,
+        (min, max) => {
+            let client = client.clone();
+            let preflighter = Arc::new(Preflighter::new_bounded(
+                client,
+                opt.remote_addr.clone(),
+                min,
+                max,
+            ));
+            {
+                let preflighter = preflighter.clone();
+                tokio::spawn(async move { preflighter.run().await });
+            }
+            Some(preflighter)
+        }
     };
 
     let listener = TcpListener::bind(opt.listen_addr).await?;
@@ -164,48 +180,32 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     while let Ok((mut inbound, client_addr)) = listener.accept().await {
         let client = client.clone();
         let opt = opt.clone();
-        // info!("acccepting connection from: {}", client_addr);
-        // preflighter is not fast enough to cover all requests
-        let preflighted = rx
-            .as_mut()
-            .ok_or(TryRecvError::Empty)
-            .and_then(|rx| rx.try_recv())
-            .map_err(|e| {
-                if e == TryRecvError::Disconnected {
-                    panic!("Preflighter termintated unexpectedly")
-                };
-                e
-            })
-            .ok();
-        // .filter(|(s, _t)| match s.as_inner().try_write(&mut []) {
-        //     Ok(_) => true,
-        //     Err(e) => e.kind() == io::ErrorKind::WouldBlock,
-        // });
+        let preflighter = preflighter.clone();
+        // let preflighted = preflighter.get();
+        // let connection =
         tokio::spawn(async move {
-            let mut snowys = match preflighted {
-                Some((s, t)) => {
-                    let tt = Instant::now();
-                    let s = s.await??;
+            let mut snowys = match preflighter {
+                Some(preflighter) => {
+                    let (s, t) = preflighter.get().await?;
                     info!(
-                        "snowy relay {} -> {} (preflighted {} ago, ready within {})",
+                        "snowy relay {} -> {} (preflighted {} ago)",
                         &client_addr,
                         &opt.remote_addr,
-                        t.elapsed().autofmt(),
-                        tt.elapsed().autofmt()
+                        t.elapsed().autofmt() // now.elapsed().autofmt()
                     );
                     s
                 }
                 None => {
-                    let now = Instant::now();
-                    let outbound = TcpStream::connect(&opt.remote_addr).await?;
-                    let s = client.connect(outbound).await?;
+                    let t = Instant::now();
+                    let s = TcpStream::connect(opt.remote_addr.as_str()).await?;
+                    let r = client.connect(s).await;
                     info!(
                         "snowy relay {} -> {} (handshaked within {})",
                         &client_addr,
                         &opt.remote_addr,
-                        now.elapsed().autofmt()
+                        t.elapsed().autofmt()
                     );
-                    s
+                    r?
                 }
             };
             let now = Instant::now();
@@ -234,37 +234,126 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     Ok(())
 }
 
-pub async fn preflight(
+struct Preflighter {
     client: Arc<Client>,
     remote_addr: String,
-    tx: mpsc::Sender<(JoinHandle<io::Result<SnowyStream>>, Instant)>,
-) -> io::Result<()> {
-    loop {
-        let now = Instant::now();
-        let remote_addr = remote_addr.clone();
-        let client = client.clone();
-        let conn = tokio::spawn(async move {
-            let s = TcpStream::connect(remote_addr).await?;
-            client.connect(s).await
-        });
-        tx.send((conn, now)).await.expect("Main task running");
-        // match TcpStream::connect(&remote_addr)
-        //     .and_then(|s| client.connect(s))
-        //     .await
-        // {
-        //     Ok(snowys) => {
-        //         debug!(
-        //             "preflighted one connection within {}",
-        //             now.elapsed().as_millis()
-        //         );
-        //         tx.send((snowys, Instant::now()))
-        //             .await
-        //             .expect("Main task running");
-        //     }
-        //     Err(e) => {
-        //         warn!("preflighter paused for a while due to: {}", e);
-        //         sleep(Duration::from_secs(3)).await;
-        //     }
-        // }
+    queue: Queue<(JoinHandle<io::Result<SnowyStream>>, Instant)>,
+    average_handshake_time: Arc<Mutex<f32>>,
+    cumulative_handshake_delay: Mutex<f32>,
+    min: usize,
+    max: Option<usize>,
+}
+
+impl Preflighter {
+    pub fn new_bounded(
+        client: Arc<Client>,
+        remote_addr: String,
+        min: usize,
+        max: Option<usize>,
+    ) -> Self {
+        assert!(min > 0 && min <= max.unwrap_or(usize::MAX));
+        Self {
+            client,
+            remote_addr,
+            queue: Queue::new(min),
+            average_handshake_time: Arc::new(Mutex::new(0.0)),
+            cumulative_handshake_delay: Mutex::new(0.0),
+            min,
+            max,
+        }
+    }
+
+    pub async fn run(&self) -> io::Result<()> {
+        loop {
+            let now = Instant::now();
+            let remote_addr = self.remote_addr.clone();
+            let client = self.client.clone();
+            let average_handshake_time = self.average_handshake_time.clone();
+            let conn = tokio::spawn(async move {
+                let t = Instant::now();
+                let s = TcpStream::connect(remote_addr.as_str()).await?;
+                let r = client.connect(s).await;
+                if r.is_ok() {
+                    let mut aht = average_handshake_time.lock().unwrap();
+                    *aht = t.elapsed().as_secs_f32() * EMA_COEFF + *aht * (1.0 - EMA_COEFF);
+                    debug!("average handshake time: {}", *aht);
+                }
+                r
+            });
+            self.queue.push((conn, now)).await;
+            debug!("preflighted one connection");
+            // tx.send((conn, now)).await.expect("Main task running");
+            // match TcpStream::connect(&remote_addr)
+            //     .and_then(|s| client.connect(s))
+            //     .await
+            // {
+            //     Ok(snowys) => {
+            //         debug!(
+            //             "preflighted one connection within {}",
+            //             now.elapsed().as_millis()
+            //         );
+            //         tx.send((snowys, Instant::now()))
+            //             .await
+            //             .expect("Main task running");
+            //     }
+            //     Err(e) => {
+            //         warn!("preflighter paused for a while due to: {}", e);
+            //         sleep(Duration::from_secs(3)).await;
+            //     }
+            // }
+        }
+    }
+
+    pub async fn get(&self) -> io::Result<(SnowyStream, Instant)> {
+        let (h, t1) = self.queue.pop().await;
+        if t1.elapsed().as_secs() as usize > CONNIDLE {
+            debug_assert!(self.queue.capacity() > 0);
+            self.queue
+                .resize(cmp::min(
+                    cmp::max(self.queue.capacity() - 1, 1),
+                    self.max.unwrap_or(usize::MAX),
+                ))
+                .await;
+            debug!(
+                "PREFLIGHT: one idle ready connection timeout, decreased preflight to {}",
+                self.queue.capacity()
+            );
+        }
+        let t2 = Instant::now();
+        debug!(
+            preflight = self.queue.len(),
+            preflight_capacity = self.queue.capacity()
+        );
+        match h.await.unwrap() {
+            Ok(s) => {
+                // (s, tt)
+                let aht = *self.average_handshake_time.lock().unwrap(); // lock dropped immediately
+                let chd = {
+                    let mut chd = self.cumulative_handshake_delay.lock().unwrap();
+                    *chd += t2.elapsed().as_secs_f32();
+                    let old_chd = *chd;
+                    if *chd > aht {
+                        *chd -= aht;
+                    }
+                    old_chd
+                };
+                debug!(chd, chd_delta = t2.elapsed().as_secs_f32(), aht);
+                if chd > aht {
+                    self.queue
+                        .resize(cmp::min(
+                            self.queue.capacity() + 1,
+                            self.max.unwrap_or(usize::MAX),
+                        ))
+                        .await;
+                    debug!(
+                        "PREFLIGHT: increased preflight to {} to accommodate cumulative handshake delay ({} s)",
+                        self.queue.capacity(),
+                        chd,
+                    );
+                }
+                Ok((s, t1))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
