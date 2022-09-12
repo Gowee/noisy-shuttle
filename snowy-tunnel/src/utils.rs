@@ -7,11 +7,11 @@ use rustls::internal::msgs::handshake::{
 use rustls::internal::msgs::message::{Message, MessageError, MessagePayload, OpaqueMessage};
 use rustls::{ContentType, Error as RustlsError, ProtocolVersion};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
-use tokio::time::Duration;
+
 use tokio::{self};
 
 use std::convert::TryFrom;
-use std::fmt::{self, Display};
+
 use std::io::{self, Read};
 use std::pin::Pin;
 use std::task::{Context, Poll};
