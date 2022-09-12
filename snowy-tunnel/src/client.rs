@@ -3,6 +3,7 @@ use rand::Rng;
 use rustls::HandshakeType;
 use rustls::ProtocolVersion;
 use rustls::ServerName;
+use rustls::internal::msgs::message::Message;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -48,11 +49,12 @@ impl Client {
             .with_safe_defaults()
             .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
             .with_no_client_auth();
-        let mut tlsconn = rustls::ClientConnection::new_with_random_and_session_id(
+        let mut tlsconn = rustls::ClientConnection::new_with(
             Arc::new(tlsconf.clone()),
             self.server_name.clone(),
             random.into(),
             session_id.as_slice().into(),
+            None::<fn(&mut Message)>,
         )
         .expect("Valid TLS config");
 

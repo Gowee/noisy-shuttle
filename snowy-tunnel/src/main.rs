@@ -11,7 +11,7 @@ use tokio::net::{lookup_host, TcpListener, TcpStream};
 
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, warn};
 
 use std::cmp;
 use std::collections::VecDeque;
@@ -32,7 +32,8 @@ mod opt;
 mod server;
 mod utils;
 
-const CONNIDLE: usize = 30; // in secs
+// preflighter params
+const CONNIDLE: usize = 120; // in secs
 const EMA_COEFF: f32 = 1.0 / 3.0;
 
 #[tokio::main]
@@ -75,7 +76,6 @@ pub async fn run_server(opt: SvrOpt) -> Result<()> {
     Ok(())
 }
 
-#[instrument]
 pub async fn handle_server_connection(
     server: Arc<Server>,
     inbound: TcpStream,
@@ -200,7 +200,7 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
                         local_in = &client_addr.to_string(),
                         local_out = s.as_inner().local_addr().unwrap().to_string(),
                         remote = &opt.remote_addr.to_string(),
-                        preflighted = t.elapsed().as_secs_f32(),
+                        // preflighted = t.elapsed().as_secs_f32(),
                         "relay"
                     );
                     s
@@ -228,11 +228,11 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
             match tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await {
                 Ok((a, b)) => {
                     info!(
-                        "connection from {} closed after {} with rx/tx: {}B/{}B",
+                        rx=a,
+                        tx=b,
+                        "connection from {} closed after {}",
                         &client_addr,
                         now.elapsed().autofmt(),
-                        a,
-                        b
                     );
                 }
                 Err(e) => {
@@ -305,7 +305,7 @@ impl Preflighter {
                 window.pop_front();
                 count -= 1;
             }
-            debug!(conns_in_last_min = count, "preflighting");
+            debug!(last_min = count, pending=self.queue.len(), "preflighting");
         }
     }
 
