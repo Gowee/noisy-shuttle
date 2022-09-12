@@ -36,7 +36,6 @@ impl Server {
     pub async fn accept(&self, mut inbound: TcpStream) -> Result<SnowyStream, AcceptError> {
         use AcceptError::*;
 
-        dbg!("acc init");
         let mut responder = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
             .build_responder()
@@ -84,7 +83,6 @@ impl Server {
             }
             rf.put(e, inbound.peer_addr().expect("TODO"));
         }
-        dbg!("noise ping confirmed");
         // Ref: https://tls12.xargs.org/
         //      https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L88
         //   record header + handshake header + server version + server random + session id len +
@@ -130,13 +128,11 @@ impl Server {
             }
         }
 
-        dbg!("hs done");
         // handshake done, drop connection to camouflage server
         tokio::spawn(async move {
             let _ = outbound.shutdown().await;
         });
 
-        dbg!("p2");
         // Noise: <- e, ee
         let mut pong = [0u8; 5 + 48]; // TODO: pad to some length
         pong[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30]);
@@ -145,8 +141,6 @@ impl Server {
             .expect("Valid NOISE state");
         debug_assert_eq!(len, 48);
         inbound.write_all(&pong).await?;
-
-        dbg!("p3");
 
         let responder = responder
             .into_transport_mode()
@@ -239,7 +233,6 @@ async fn relay_until_handshake_finished(
 ) -> io::Result<()> {
     let (rin, win) = inbound.split();
     let (rout, wout) = outbound.split();
-    dbg!("copy tls hs");
     let (a, b) = tokio::join!(
         copy_until_handshake_finished(rin, wout),
         copy_until_handshake_finished(rout, win)

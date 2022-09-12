@@ -21,7 +21,7 @@ lazy_static! {
 }
 
 pub const TLS_RECORD_HEADER_LENGTH: usize = 5; // 1 type + 2 proto ver + 2 data len
-pub const MAXIMUM_CIPHERTEXT_LENGTH: usize = u16::MAX as usize; // show::constants::MAXMSGLEN
+pub const MAXIMUM_CIPHERTEXT_LENGTH: usize = 2usize.pow(14); // 16KiB < show::constants::MAXMSGLEN
 pub const AEAD_TAG_LENGTH: usize = 16; // show::constants::TAGLEN
 pub const MAXIMUM_PLAINTEXT_LENGTH: usize = MAXIMUM_CIPHERTEXT_LENGTH - AEAD_TAG_LENGTH;
 pub const PSKLEN: usize = 32; // snow::constants::PSKLEN;
@@ -196,7 +196,7 @@ impl AsyncWrite for SnowyStream {
                 this.write_buffer
                     .set_len(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
             }
-            this.write_buffer[0..3].copy_from_slice(&[0x17, 0x03, 0x03]);
+            this.write_buffer[0..3].copy_from_slice(&[0x17, 0x03, 0x03]); // 3,3 is for TLS 1.2/1.3
             let len = cmp::min(buf.len() - offset, MAXIMUM_PLAINTEXT_LENGTH);
             let n = this
                 .noise

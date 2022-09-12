@@ -12,3 +12,4 @@ Inspired by https://github.com/ihciah/shadow-tls.
 - [ ] Utilize Keyshare?
 - [ ] Specify TLS fingerprint (JA3)
 - [ ] Configurable actions for unauthenticated client
+- [ ] Random packet padding and even packets
