@@ -1,6 +1,6 @@
 use rustls::internal::msgs::codec::Reader;
 use rustls::internal::msgs::handshake::{
-    ClientExtension, ClientHelloPayload, HandshakeMessagePayload, HandshakePayload,
+    ClientHelloPayload, HandshakeMessagePayload, HandshakePayload,
     ServerExtension, ServerHelloPayload,
 };
 
@@ -136,15 +136,15 @@ pub fn parse_tls_plain_message(buf: &[u8]) -> Result<Message, RustlsError> {
         .and_then(Message::try_from)
 }
 
-pub async fn read_and_parse_tls_plain_message(
-    r: impl AsyncRead + Unpin,
-) -> io::Result<Result<Message, RustlsError>> {
-    let mut buf = Vec::new();
-    Ok(read_tls_message(r, &mut buf)
-        .await?
-        .map_err(|_e| RustlsError::CorruptMessage)
-        .and_then(|_| parse_tls_plain_message(&buf)))
-}
+// pub async fn read_and_parse_tls_plain_message(
+//     r: impl AsyncRead + Unpin,
+// ) -> io::Result<Result<Message, RustlsError>> {
+//     let mut buf = Vec::new();
+//     Ok(read_tls_message(r, &mut buf)
+//         .await?
+//         .map_err(|_e| RustlsError::CorruptMessage)
+//         .and_then(|_| parse_tls_plain_message(&buf)))
+// }
 
 pub trait TlsMessageExt {
     fn into_client_hello_payload(self) -> Option<ClientHelloPayload>;
@@ -199,25 +199,25 @@ pub fn get_server_tls_version(shp: &ServerHelloPayload) -> Option<ProtocolVersio
         .cloned()
 }
 
-pub fn get_client_tls_versions(shp: &ClientHelloPayload) -> Option<&Vec<ProtocolVersion>> {
-    shp.extensions
-        .iter()
-        .filter_map(|ext| {
-            if let ClientExtension::SupportedVersions(vers) = ext {
-                Some(vers)
-            } else {
-                None
-            }
-        })
-        .next()
-}
+// pub fn get_client_tls_versions(shp: &ClientHelloPayload) -> Option<&Vec<ProtocolVersion>> {
+//     shp.extensions
+//         .iter()
+//         .filter_map(|ext| {
+//             if let ClientExtension::SupportedVersions(vers) = ext {
+//                 Some(vers)
+//             } else {
+//                 None
+//             }
+//         })
+//         .next()
+// }
 
 pub trait DurationExt {
-    fn autofmt<'a>(&'a self) -> DurationAutoFormatter<'a>;
+    fn autofmt(&'_ self) -> DurationAutoFormatter<'_>;
 }
 
 impl DurationExt for Duration {
-    fn autofmt<'a>(&'a self) -> DurationAutoFormatter<'a> {
+    fn autofmt(&'_ self) -> DurationAutoFormatter<'_> {
         DurationAutoFormatter(self)
     }
 }
@@ -225,29 +225,29 @@ impl DurationExt for Duration {
 pub struct DurationAutoFormatter<'a>(pub &'a Duration);
 
 impl<'a> Display for DurationAutoFormatter<'a> {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         let t = self.0.as_nanos();
         match t {
             t if t < 1000 => {
                 write!(fmt, "{:.3}ns", t)
             }
-            t if t < 1000_000 => {
+            t if t < 1_000_000 => {
                 write!(fmt, "{:.3}µs", t as f64 / 1000.0)
             }
-            t if t < 1000_000_000 => {
-                write!(fmt, "{:.3}ms", t as f64 / 1000_000.0)
+            t if t < 1_000_000_000 => {
+                write!(fmt, "{:.3}ms", t as f64 / 1_000_000.0)
             }
-            t if t < 1000_000_000_000 => {
-                write!(fmt, "{:.3}s", t as f64 / 1000_000_000.0)
+            t if t < 1_000_000_000_000 => {
+                write!(fmt, "{:.3}s", t as f64 / 1_000_000_000.0)
             }
             t if t < 60_000_000_000_000 => {
-                write!(fmt, "{:.3}mins", t as f64 / 1000_000_000_000.0)
+                write!(fmt, "{:.3}mins", t as f64 / 1_000_000_000_000.0)
             }
-            t if t < 3600_000_000_000_000 => {
+            t if t < 3_600_000_000_000_000 => {
                 write!(fmt, "{:.3}hrs", t / 60_000_000_000_000)
             }
             t /* if t < 24 * 3600_000_000_000_000 */ => {
-                write!(fmt, "{:.3}days", t / 3600_000_000_000_000)
+                write!(fmt, "{:.3}days", t / 3_600_000_000_000_000)
             }
         }
     }

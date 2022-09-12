@@ -5,19 +5,19 @@ use common::SnowyStream;
 use structopt::StructOpt;
 
 use deadqueue::resizable::Queue;
-use futures::TryFutureExt;
+
 use tokio::io::AsyncWriteExt;
 use tokio::net::{lookup_host, TcpListener, TcpStream};
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
+
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::Instant;
 use tracing::{debug, info, instrument, warn};
 
 use std::cmp;
+use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
-use std::ops::{Bound, RangeBounds};
+
 use std::sync::{Arc, Mutex};
 
 use crate::client::Client;
@@ -148,9 +148,13 @@ pub async fn handle_server_connection(
 
 pub async fn run_client(opt: CltOpt) -> Result<()> {
     info!(
-        "client is up with remote: {}, sni: {}, preflight: {:#?}",
-        &opt.remote_addr, &opt.server_name, opt.preflight
+        "client is up with remote: {}, sni: {}, preflight: {}–{}",
+        &opt.remote_addr,
+        &opt.server_name,
+        &opt.preflight.0,
+        &opt.preflight.1.unwrap_or(usize::MAX)
     );
+    debug!(connidle = CONNIDLE, aht_ema_coeff = EMA_COEFF);
     let client = Arc::new(Client {
         key: derive_psk(opt.key.as_bytes()),
         server_name: opt.server_name.as_str().try_into().unwrap(),
@@ -188,10 +192,16 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
                 Some(preflighter) => {
                     let (s, t) = preflighter.get().await?;
                     info!(
-                        "snowy relay {} -> {} (preflighted {} ago)",
+                        "snowy relay starts for {} (preflighted {} ago)",
                         &client_addr,
-                        &opt.remote_addr,
-                        t.elapsed().autofmt() // now.elapsed().autofmt()
+                        t.elapsed().autofmt()
+                    );
+                    debug!(
+                        local_in = &client_addr.to_string(),
+                        local_out = s.as_inner().local_addr().unwrap().to_string(),
+                        remote = &opt.remote_addr.to_string(),
+                        preflighted = t.elapsed().as_secs_f32(),
+                        "relay"
                     );
                     s
                 }
@@ -200,10 +210,16 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
                     let s = TcpStream::connect(opt.remote_addr.as_str()).await?;
                     let r = client.connect(s).await;
                     info!(
-                        "snowy relay {} -> {} (handshaked within {})",
+                        "snowy relay start for {} (handshaked within {})",
                         &client_addr,
-                        &opt.remote_addr,
                         t.elapsed().autofmt()
+                    );
+                    debug!(
+                        local_in = &client_addr.to_string(),
+                        local_out = &opt.remote_addr.to_string(),
+                        remote = opt.remote_addr.as_str(),
+                        handshake = t.elapsed().as_secs_f32(),
+                        "relay"
                     );
                     r?
                 }
@@ -264,6 +280,8 @@ impl Preflighter {
     }
 
     pub async fn run(&self) -> io::Result<()> {
+        let mut window = VecDeque::new();
+        let mut count = 0;
         loop {
             let now = Instant::now();
             let remote_addr = self.remote_addr.clone();
@@ -271,36 +289,23 @@ impl Preflighter {
             let average_handshake_time = self.average_handshake_time.clone();
             let conn = tokio::spawn(async move {
                 let t = Instant::now();
-                let s = TcpStream::connect(remote_addr.as_str()).await?;
-                let r = client.connect(s).await;
+                let s = TcpStream::connect(remote_addr.as_str()).await;
+                let r = client.connect(s?).await;
                 if r.is_ok() {
                     let mut aht = average_handshake_time.lock().unwrap();
                     *aht = t.elapsed().as_secs_f32() * EMA_COEFF + *aht * (1.0 - EMA_COEFF);
-                    debug!("average handshake time: {}", *aht);
+                    debug!(aht = *aht, "update average handshake time"); // TODO: drop lock before logging
                 }
                 r
             });
             self.queue.push((conn, now)).await;
-            debug!("preflighted one connection");
-            // tx.send((conn, now)).await.expect("Main task running");
-            // match TcpStream::connect(&remote_addr)
-            //     .and_then(|s| client.connect(s))
-            //     .await
-            // {
-            //     Ok(snowys) => {
-            //         debug!(
-            //             "preflighted one connection within {}",
-            //             now.elapsed().as_millis()
-            //         );
-            //         tx.send((snowys, Instant::now()))
-            //             .await
-            //             .expect("Main task running");
-            //     }
-            //     Err(e) => {
-            //         warn!("preflighter paused for a while due to: {}", e);
-            //         sleep(Duration::from_secs(3)).await;
-            //     }
-            // }
+            window.push_back(Instant::now());
+            count += 1;
+            while window.front().is_some() && window.front().unwrap().elapsed().as_secs() > 60 {
+                window.pop_front();
+                count -= 1;
+            }
+            debug!(conns_in_last_min = count, "preflighting");
         }
     }
 
@@ -309,21 +314,15 @@ impl Preflighter {
         if t1.elapsed().as_secs() as usize > CONNIDLE {
             debug_assert!(self.queue.capacity() > 0);
             self.queue
-                .resize(cmp::min(
-                    cmp::max(self.queue.capacity() - 1, 1),
-                    self.max.unwrap_or(usize::MAX),
-                ))
+                .resize(cmp::max(self.queue.capacity() - 1, self.min))
                 .await;
             debug!(
-                "PREFLIGHT: one idle ready connection timeout, decreased preflight to {}",
-                self.queue.capacity()
+                preflight_enqueued = self.queue.len(),
+                preflight_capacity = self.queue.capacity(),
+                "one idle ready connection timeout, decrease preflight",
             );
         }
         let t2 = Instant::now();
-        debug!(
-            preflight = self.queue.len(),
-            preflight_capacity = self.queue.capacity()
-        );
         match h.await.unwrap() {
             Ok(s) => {
                 // (s, tt)
@@ -337,7 +336,12 @@ impl Preflighter {
                     }
                     old_chd
                 };
-                debug!(chd, chd_delta = t2.elapsed().as_secs_f32(), aht);
+                debug!(
+                    chd = chd,
+                    chd_delta = t2.elapsed().as_secs_f32(),
+                    aht = aht,
+                    "accumulate handshake delay"
+                );
                 if chd > aht {
                     self.queue
                         .resize(cmp::min(
@@ -346,14 +350,17 @@ impl Preflighter {
                         ))
                         .await;
                     debug!(
-                        "PREFLIGHT: increased preflight to {} to accommodate cumulative handshake delay ({} s)",
-                        self.queue.capacity(),
-                        chd,
+                        preflight_capacity = self.queue.capacity(),
+                        chd = chd,
+                        "PREFLIGHT: increase preflight to accommodate cumulative handshake delay",
                     );
                 }
                 Ok((s, t1))
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                warn!(e = e.to_string());
+                Err(e)
+            }
         }
     }
 }

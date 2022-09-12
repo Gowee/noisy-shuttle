@@ -206,7 +206,7 @@ impl AsyncWrite for SnowyStream {
                 )
                 .unwrap();
             offset += len;
-            debug_assert!(offset < buf.len());
+            debug_assert!(offset <= buf.len());
             this.write_buffer[3..5].copy_from_slice(&(n as u16).to_be_bytes());
             this.write_buffer.truncate(TLS_RECORD_HEADER_LENGTH + n);
         }

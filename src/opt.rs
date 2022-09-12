@@ -1,10 +1,7 @@
 use structopt::clap::AppSettings::{ColoredHelp, DeriveDisplayOrder};
 use structopt::StructOpt;
 
-use std::ascii::AsciiExt;
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
-use std::ops::RangeInclusive;
 
 #[derive(Debug, Clone, StructOpt)]
 #[structopt(name = "noisy-shuttle", about = "Shuttle for the Internet", global_settings(&[ColoredHelp, DeriveDisplayOrder]))]
