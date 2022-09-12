@@ -2,8 +2,7 @@
 
 members = [
     "snowy-tunnel",
-    # "adder",
-    # "add_one",
+    "shuttle"
 ]
 
 [patch.crates-io]

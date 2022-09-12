@@ -569,6 +569,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "noisy-shuttle"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap 3.2.20",
+ "deadqueue",
+ "lru",
+ "snowy-tunnel",
+ "structopt",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "num_cpus"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

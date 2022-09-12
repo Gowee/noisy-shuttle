@@ -1,7 +1,7 @@
 use rustls::internal::msgs::codec::Reader;
 use rustls::internal::msgs::handshake::{
-    ClientHelloPayload, HandshakeMessagePayload, HandshakePayload,
-    ServerExtension, ServerHelloPayload,
+    ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, ServerExtension,
+    ServerHelloPayload,
 };
 
 use rustls::internal::msgs::message::{Message, MessageError, MessagePayload, OpaqueMessage};
@@ -211,47 +211,6 @@ pub fn get_server_tls_version(shp: &ServerHelloPayload) -> Option<ProtocolVersio
 //         })
 //         .next()
 // }
-
-pub trait DurationExt {
-    fn autofmt(&'_ self) -> DurationAutoFormatter<'_>;
-}
-
-impl DurationExt for Duration {
-    fn autofmt(&'_ self) -> DurationAutoFormatter<'_> {
-        DurationAutoFormatter(self)
-    }
-}
-
-pub struct DurationAutoFormatter<'a>(pub &'a Duration);
-
-impl<'a> Display for DurationAutoFormatter<'a> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let t = self.0.as_nanos();
-        match t {
-            t if t < 1000 => {
-                write!(fmt, "{:.3}ns", t)
-            }
-            t if t < 1_000_000 => {
-                write!(fmt, "{:.3}µs", t as f64 / 1000.0)
-            }
-            t if t < 1_000_000_000 => {
-                write!(fmt, "{:.3}ms", t as f64 / 1_000_000.0)
-            }
-            t if t < 1_000_000_000_000 => {
-                write!(fmt, "{:.3}s", t as f64 / 1_000_000_000.0)
-            }
-            t if t < 60_000_000_000_000 => {
-                write!(fmt, "{:.3}mins", t as f64 / 1_000_000_000_000.0)
-            }
-            t if t < 3_600_000_000_000_000 => {
-                write!(fmt, "{:.3}hrs", t / 60_000_000_000_000)
-            }
-            t /* if t < 24 * 3600_000_000_000_000 */ => {
-                write!(fmt, "{:.3}days", t / 3_600_000_000_000_000)
-            }
-        }
-    }
-}
 
 // // https://stackoverflow.com/a/72461302/5488616
 // pub fn concat_arrays<T, const M: usize, const N: usize>(a: [T; M], b: [T; N]) -> [T; M + N] {

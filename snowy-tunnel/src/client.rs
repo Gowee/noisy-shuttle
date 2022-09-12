@@ -1,9 +1,9 @@
 use rand::Rng;
 
+use rustls::internal::msgs::message::Message;
 use rustls::HandshakeType;
 use rustls::ProtocolVersion;
 use rustls::ServerName;
-use rustls::internal::msgs::message::Message;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;

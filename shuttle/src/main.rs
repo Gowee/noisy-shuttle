@@ -1,14 +1,10 @@
 #![warn(rust_2018_idioms)]
 
 use anyhow::Result;
-use common::SnowyStream;
-use structopt::StructOpt;
-
 use deadqueue::resizable::Queue;
-
+use structopt::StructOpt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{lookup_host, TcpListener, TcpStream};
-
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
@@ -17,20 +13,15 @@ use std::cmp;
 use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
-
 use std::sync::{Arc, Mutex};
 
-use crate::client::Client;
-use crate::common::derive_psk;
-use crate::opt::{CltOpt, Opt, SvrOpt};
-use crate::server::Server;
-use crate::utils::DurationExt;
+use snowy_tunnel::{derive_psk, Client, Server, SnowyStream};
 
-mod client;
-mod common;
 mod opt;
-mod server;
 mod utils;
+
+use crate::opt::{CltOpt, Opt, SvrOpt};
+use crate::utils::DurationExt;
 
 // preflighter params
 const CONNIDLE: usize = 120; // in secs
@@ -83,7 +74,7 @@ pub async fn handle_server_connection(
     opt: Arc<SvrOpt>,
 ) -> io::Result<()> {
     info!("accepting connection from {}", &client_addr);
-    use crate::server::AcceptError::*;
+    use snowy_tunnel::AcceptError::*;
     match server.accept(inbound).await {
         Ok(mut snowys) => {
             let mut outbound = TcpStream::connect(&opt.remote_addr).await?;
@@ -228,8 +219,8 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
             match tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await {
                 Ok((a, b)) => {
                     info!(
-                        rx=a,
-                        tx=b,
+                        rx = a,
+                        tx = b,
                         "connection from {} closed after {}",
                         &client_addr,
                         now.elapsed().autofmt(),
@@ -305,7 +296,7 @@ impl Preflighter {
                 window.pop_front();
                 count -= 1;
             }
-            debug!(last_min = count, pending=self.queue.len(), "preflighting");
+            debug!(last_min = count, pending = self.queue.len(), "preflighting");
         }
     }
 
