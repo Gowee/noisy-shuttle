@@ -1,8 +1,7 @@
 use blake2::{Blake2s256, Digest};
 use lazy_static::lazy_static;
 use rustls::internal::msgs::deframer::MessageDeframer;
-use rustls::internal::msgs::enums::AlertLevel;
-use rustls::internal::msgs::message::Message;
+
 use snow::params::NoiseParams;
 use snow::TransportState;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -23,7 +22,7 @@ lazy_static! {
 }
 
 pub const TLS_RECORD_HEADER_LENGTH: usize = 5; // 1 type + 2 proto ver + 2 data len
-pub const MAXIMUM_CIPHERTEXT_LENGTH: usize = 2usize.pow(14); // 16KiB < show::constants::MAXMSGLEN
+pub const MAXIMUM_CIPHERTEXT_LENGTH: usize = 2usize.pow(14); // 2**14B = 16KiB < show::constants::MAXMSGLEN
 pub const AEAD_TAG_LENGTH: usize = 16; // show::constants::TAGLEN
 pub const MAXIMUM_PLAINTEXT_LENGTH: usize = MAXIMUM_CIPHERTEXT_LENGTH - AEAD_TAG_LENGTH;
 pub const PSKLEN: usize = 32; // snow::constants::PSKLEN;
@@ -269,7 +268,7 @@ impl AsyncWrite for SnowyStream {
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.state.writeable() {
             self.state.shutdown_write();
-            // proceed even if state has already been not writable
+            // proceed even if state has already been unwritable
             // otherwise latter steps would be ignored in second poll calls
         }
         // TODO: https://www.openssl.org/docs/man1.0.2/man3/SSL_shutdown.html
