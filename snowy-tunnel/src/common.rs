@@ -94,12 +94,15 @@ impl AsyncRead for SnowyStream {
                         // buf is full
                         break 'read_more;
                     }
+                    this.read_offset = 0;
+                    this.read_buffer.clear();
                 }
-                this.read_offset = 0;
-                this.read_buffer.clear();
+                debug_assert_eq!(this.read_offset, 0);
+                debug_assert_eq!(this.read_buffer.len(), 0);
 
                 // then, try to pop a ready TLS frame
                 if let Some(message) = this.tls_deframer.frames.pop_front() {
+                    // TODO: handle close notify
                     if message.payload.0.is_empty() {
                         continue;
                     }
@@ -116,33 +119,41 @@ impl AsyncRead for SnowyStream {
                     break 'read_ready;
                 }
             }
-            // the best practice is to be conservative on making syscalls
-            // so here prefer to return progress if any over proceeding to read the inner socket
+            // Note: the best practice is to be conservative on making syscalls
+            // so here prefer to return progress if any, over proceeding to read the inner socket
             if has_read {
                 break 'read_more;
             }
 
-            // otherwse, read the underlying socket
+            // otherwise, read the underlying socket
             match this.tls_deframer.read(&mut SyncReadAdapter {
                 io: &mut this.socket,
                 cx,
             }) {
                 Ok(n) => {
                     if n == 0 {
-                        this.state.shutdown_read(); // TODO: ?
-                        return Poll::Ready(Ok(()));
+                        // per trait's doc:
+                        //    If no data was read (buf.filled().len() is unchanged), it implies
+                        //    that EOF has been reached.
+                        this.state.shutdown_read();
+                        break 'read_more;
                     }
+                    // proceed to parse TLS frames
                 }
                 Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
                     return Poll::Pending;
                 }
-                Err(err) if err.kind() == io::ErrorKind::ConnectionAborted => {
-                    // other error?
-                    this.state.shutdown_read();
-                    return dbg!(Poll::Ready(Err(err)));
-                }
                 Err(err) => {
-                    return dbg!(Poll::Ready(Err(err)));
+                    // TODO: what are we doing here?
+                    //   will caller call poll_read for a second time after a fatal error at all?
+                    match err.kind() {
+                        // ErrorKind are copied are tokio-rustls. Why do not we handle other errors?
+                        io::ErrorKind::ConnectionAborted | io::ErrorKind::UnexpectedEof => {
+                            this.state.shutdown_read();
+                        }
+                        _ => {}
+                    }
+                    return Poll::Ready(Err(err));
                 }
             }
         }
@@ -159,11 +170,31 @@ impl AsyncWrite for SnowyStream {
         if !self.state.writeable() {
             return Poll::Ready(Ok(0));
         }
+        // WARN:
+        //   In current implementation, Ready(Ok(n)) only guarantees buf has been written to the
+        //   internal buffer write_buffer. It wouldn't be flushed automatically if there is no
+        //   further poll_write/flush calls.
+        //   So it is responsibility of the caller to call poll_flush to push.
+        //
+        //   It appears to be an inevitable design drawbacks in AsyncRead/AsyncWrite when working
+        //   with framed protocols.
+        //   ref: https://github.com/tokio-rs/tls/issues/41
+        //
+        //   tokio::io::copy_bidirectional will poll_flush only iff poll_read is Pending, but in
+        //   such way, write might be delayed when it is possible to make progress.
+        //   ref: https://github.com/tokio-rs/tokio/blob/42d5a9fcd4cf87fb0dd96a1850bdd2e9345a84b9/tokio/src/io/util/copy.rs#L51
+        //        https://github.com/tokio-rs/tokio/pull/4001
         let mut this = self.get_mut();
         let mut offset = 0;
+
         loop {
             // first, clean pending write_buffer (an encoded TLS frame)
-            while this.write_offset != this.write_buffer.len() {
+
+            // We should have been conservative on making syscalls as in poll_read.
+            // But as noted above, Ready(Ok(n)) does not indicate data is writen out at all. We
+            // choose to push the write as eagerly as possible instead of just expecting a second
+            // call. Not sure if it is really proper, though.
+            while this.write_offset < this.write_buffer.len() {
                 match Pin::new(&mut this.socket)
                     .poll_write(cx, &this.write_buffer[this.write_offset..])
                 {
@@ -171,8 +202,7 @@ impl AsyncWrite for SnowyStream {
                         let n = r?;
                         this.write_offset += n;
                         if n == 0 {
-                            // TODO: clean write buffer?
-                            // this.state.shutdown_write();
+                            // TODO: should shutdown_write?
                             return Poll::Ready(Ok(0));
                         }
                     }
@@ -180,6 +210,7 @@ impl AsyncWrite for SnowyStream {
                         return if offset == 0 {
                             Poll::Pending
                         } else {
+                            // the waker has been registered for nothing, but it seems inevitable
                             Poll::Ready(Ok(offset))
                         };
                     }
@@ -207,7 +238,7 @@ impl AsyncWrite for SnowyStream {
                     &mut this.write_buffer[TLS_RECORD_HEADER_LENGTH..],
                 )
                 .unwrap();
-            // Note: plaintext.len < ciphertext.n and typically len + AEAD_TAG_LENGTH = n
+            // plaintext.len < ciphertext.n and typically len + AEAD_TAG_LENGTH = n
             debug_assert_eq!(len + AEAD_TAG_LENGTH, n);
             offset += len;
             debug_assert!(offset <= buf.len());
@@ -236,11 +267,10 @@ impl AsyncWrite for SnowyStream {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // self.state.shutdown_write();
-        // proceed even if state has already been not writable
-        // otherwise latter steps would be ignored in second poll calls
         if self.state.writeable() {
             self.state.shutdown_write();
+            // proceed even if state has already been not writable
+            // otherwise latter steps would be ignored in second poll calls
         }
         // TODO: https://www.openssl.org/docs/man1.0.2/man3/SSL_shutdown.html
         // https://github.com/tokio-rs/tls/blob/56855b71661a9bf848c1a3c3f03ead6ac3f1b49f/tokio-rustls/src/client.rs#L235
