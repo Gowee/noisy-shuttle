@@ -3,7 +3,7 @@
 use anyhow::Result;
 use deadqueue::resizable::Queue;
 use structopt::StructOpt;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -217,6 +217,34 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
                 }
             };
             let now = Instant::now();
+            // let (mut ai, mut ao) = tokio::io::split(snowys);
+            // let (mut bi, mut bo) = inbound.into_split();
+            // let a = tokio::spawn(async move {
+            //     // let mut buf = vec![0u8; 10240];
+            //     // loop {
+            //     //     let len = ai.read(&mut buf).await.unwrap();
+            //     //     if len == 0 {
+            //     //         break;
+            //     //     }
+            //     //     sleep(Duration::from_secs(3)).await;
+            //     //     bo.write_all(&buf[..len]).await.unwrap();
+            //     // }
+            //     dbg!(tokio::io::copy(&mut ai, &mut bo).await).unwrap();
+            // });
+            // let b = tokio::spawn(async move {
+            //     // let mut buf = vec![0u8; 10240];
+            //     // loop {
+            //     //     let len = bi.read(&mut buf).await.unwrap();
+            //     //     if len == 0 {
+            //     //         break;
+            //     //     }
+            //     //     sleep(Duration::from_secs(3)).await;
+            //     //     ao.write_all(&buf[..len]).await.unwrap();
+            //     // }
+            //     dbg!(tokio::io::copy(&mut bi, &mut ao).await).unwrap();
+            // });
+            // a.await?;
+            // b.await?;
             match tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await {
                 Ok((a, b)) => {
                     info!(
@@ -229,7 +257,7 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
                 }
                 Err(e) => {
                     info!(
-                        "connection from {} terminated after {} with error: {} ",
+                        "connection from {} terminated after {} with error: {:#?} ",
                         &client_addr,
                         now.elapsed().autofmt(),
                         e,

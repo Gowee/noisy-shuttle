@@ -124,6 +124,7 @@ pub async fn read_tls_message(
     buf.reserve_exact((TLS_RECORD_HEADER_LENGTH + len).max(buf.len()) - buf.len());
     unsafe { buf.set_len(TLS_RECORD_HEADER_LENGTH + len) };
     buf[..TLS_RECORD_HEADER_LENGTH].copy_from_slice(&header);
+    dbg!(len);
     r.read_exact(&mut buf[TLS_RECORD_HEADER_LENGTH..]).await?;
     Ok(Ok(()))
 }

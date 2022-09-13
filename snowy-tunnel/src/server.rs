@@ -1,11 +1,11 @@
 use lru::LruCache;
+use rand::{thread_rng, Rng};
 use rustls::{HandshakeType, ProtocolVersion};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
 use std::io;
-
 use std::net::SocketAddr;
 use std::sync::Mutex;
 
@@ -134,18 +134,22 @@ impl Server {
         });
 
         // Noise: <- e, ee
-        let mut pong = [0u8; 5 + 48]; // TODO: pad to some length
-        pong[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30]);
+        let mut pong = [0u8; 5 + 48 + 24]; // 0 - 24 random padding
+        let pad_len = thread_rng().gen_range(0..=24);
+        rand::thread_rng().fill(&mut pong[5 + 48..5 + 48 + pad_len]);
+        pong[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30 + pad_len as u8]);
         let len = responder
             .write_message(&[], &mut pong[5..])
             .expect("Valid NOISE state");
         debug_assert_eq!(len, 48);
-        inbound.write_all(&pong).await?;
+        inbound
+            .write_all(&pong[..5 + 48 + pad_len])
+            .await?;
+        // but, is uniform random length of a message of first a few ones a characteristic per se?
 
         let responder = responder
             .into_transport_mode()
             .expect("NOISE handshake finished");
-        // let len = responder.write_message(b"pong", &mut buf).unwrap(); // message being &mut [] resulted in mysterious Decrypt error
         Ok(SnowyStream::new(inbound, responder))
     }
 }

@@ -108,6 +108,7 @@ impl AsyncRead for SnowyStream {
                     this.read_buffer
                         .reserve_exact(MAXIMUM_PLAINTEXT_LENGTH - this.read_buffer.capacity());
                     unsafe { this.read_buffer.set_len(MAXIMUM_PLAINTEXT_LENGTH) };
+                    // ensure message payload no empty, o.w. mysterious Decrypt error may be resulted
                     let len = this
                         .noise
                         .read_message(&message.payload.0, &mut this.read_buffer)
