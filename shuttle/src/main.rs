@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use std::cmp;
 use std::collections::VecDeque;
@@ -67,13 +67,14 @@ pub async fn run_server(opt: SvrOpt) -> Result<()> {
     Ok(())
 }
 
+#[instrument(level = "trace")]
 pub async fn handle_server_connection(
     server: Arc<Server>,
     inbound: TcpStream,
     client_addr: SocketAddr,
     opt: Arc<SvrOpt>,
 ) -> io::Result<()> {
-    info!("accepting connection from {}", &client_addr);
+    debug!("accepting connection from {}", &client_addr);
     use snowy_tunnel::AcceptError::*;
     match server.accept(inbound).await {
         Ok(mut snowys) => {
@@ -241,6 +242,7 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
 struct Preflighter {
     client: Arc<Client>,
     remote_addr: String,
@@ -300,6 +302,7 @@ impl Preflighter {
         }
     }
 
+    #[instrument(level = "trace")]
     pub async fn get(&self) -> io::Result<(SnowyStream, Instant)> {
         let (h, t1) = self.queue.pop().await;
         if t1.elapsed().as_secs() as usize > CONNIDLE {

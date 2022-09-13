@@ -1,6 +1,8 @@
 use blake2::{Blake2s256, Digest};
 use lazy_static::lazy_static;
 use rustls::internal::msgs::deframer::MessageDeframer;
+use rustls::internal::msgs::enums::AlertLevel;
+use rustls::internal::msgs::message::Message;
 use snow::params::NoiseParams;
 use snow::TransportState;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -77,73 +79,70 @@ impl AsyncRead for SnowyStream {
         if !self.state.readable() {
             return Poll::Ready(Ok(()));
         }
-
         // Ref: https://github.com/tokio-rs/tls/blob/bcf4f8e3f96983dbb7a61808b0f1fcd04fb678ae/tokio-rustls/src/common/mod.rs#L91
         let this = self.get_mut();
         let mut has_read = false;
-        loop {
-            if this.read_offset < this.read_buffer.len() {
-                let b = unsafe {
-                    &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8])
-                };
-                let len = cmp::min(this.read_buffer.len() - this.read_offset, b.len());
-                b[..len]
-                    .copy_from_slice(&this.read_buffer[this.read_offset..this.read_offset + len]);
-                unsafe {
-                    buf.assume_init(len);
-                }
-                buf.advance(len);
-                this.read_offset += len;
-                has_read = len > 0;
+        'read_more: loop {
+            'read_ready: loop {
+                // first, clean pending read_buffer
                 if this.read_offset < this.read_buffer.len() {
-                    break;
+                    let len = cmp::min(this.read_buffer.len() - this.read_offset, buf.remaining());
+                    buf.put_slice(&this.read_buffer[this.read_offset..this.read_offset + len]);
+                    this.read_offset += len;
+                    has_read |= len > 0;
+                    if this.read_offset < this.read_buffer.len() {
+                        // buf is full
+                        break 'read_more;
+                    }
+                }
+                this.read_offset = 0;
+                this.read_buffer.clear();
+
+                // then, try to pop a ready TLS frame
+                if let Some(message) = this.tls_deframer.frames.pop_front() {
+                    if message.payload.0.is_empty() {
+                        continue;
+                    }
+                    this.read_buffer
+                        .reserve_exact(MAXIMUM_PLAINTEXT_LENGTH - this.read_buffer.capacity());
+                    unsafe { this.read_buffer.set_len(MAXIMUM_PLAINTEXT_LENGTH) };
+                    let len = this
+                        .noise
+                        .read_message(&message.payload.0, &mut this.read_buffer)
+                        .expect("TODO");
+                    this.read_buffer.truncate(len);
+                } else {
+                    // no ready tls frame, proceed to read the inner socket
+                    break 'read_ready;
                 }
             }
-            this.read_offset = 0;
-            this.read_buffer.clear();
+            // the best practice is to be conservative on making syscalls
+            // so here prefer to return progress if any over proceeding to read the inner socket
+            if has_read {
+                break 'read_more;
+            }
 
-            if let Some(message) = this.tls_deframer.frames.pop_front() {
-                if message.payload.0.is_empty() {
-                    continue;
+            // otherwse, read the underlying socket
+            match this.tls_deframer.read(&mut SyncReadAdapter {
+                io: &mut this.socket,
+                cx,
+            }) {
+                Ok(n) => {
+                    if n == 0 {
+                        this.state.shutdown_read(); // TODO: ?
+                        return Poll::Ready(Ok(()));
+                    }
                 }
-                this.read_buffer
-                    .reserve_exact(MAXIMUM_PLAINTEXT_LENGTH - this.read_buffer.capacity());
-                unsafe { this.read_buffer.set_len(MAXIMUM_PLAINTEXT_LENGTH) };
-                let len = this
-                    .noise
-                    .read_message(&message.payload.0, &mut this.read_buffer)
-                    .expect("TODO");
-                this.read_buffer.truncate(len);
-            } else {
-                let n = match this.tls_deframer.read(&mut SyncReadAdapter {
-                    io: &mut this.socket,
-                    cx,
-                }) {
-                    Ok(n) => {
-                        if n == 0 {
-                            this.state.shutdown_read();
-                            return Poll::Ready(Ok(()));
-                        }
-                        n
-                    }
-                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        return if has_read {
-                            Poll::Ready(Ok(()))
-                        } else {
-                            Poll::Pending
-                        };
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::ConnectionAborted => {
-                        this.state.shutdown_read();
-                        return dbg!(Poll::Ready(Err(err)));
-                    }
-                    Err(err) => {
-                        return dbg!(Poll::Ready(Err(err)));
-                    }
-                };
-                if n == 0 {
-                    // EoF
-                    return Poll::Ready(Ok(()));
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    return Poll::Pending;
+                }
+                Err(err) if err.kind() == io::ErrorKind::ConnectionAborted => {
+                    // other error?
+                    this.state.shutdown_read();
+                    return dbg!(Poll::Ready(Err(err)));
+                }
+                Err(err) => {
+                    return dbg!(Poll::Ready(Err(err)));
                 }
             }
         }
@@ -163,18 +162,19 @@ impl AsyncWrite for SnowyStream {
         let mut this = self.get_mut();
         let mut offset = 0;
         loop {
+            // first, clean pending write_buffer (an encoded TLS frame)
             while this.write_offset != this.write_buffer.len() {
                 match Pin::new(&mut this.socket)
                     .poll_write(cx, &this.write_buffer[this.write_offset..])
                 {
                     Poll::Ready(r) => {
                         let n = r?;
+                        this.write_offset += n;
                         if n == 0 {
                             // TODO: clean write buffer?
-                            this.state.shutdown_write();
+                            // this.state.shutdown_write();
                             return Poll::Ready(Ok(0));
                         }
-                        this.write_offset += n;
                     }
                     Poll::Pending => {
                         return if offset == 0 {
@@ -190,6 +190,8 @@ impl AsyncWrite for SnowyStream {
             if offset == buf.len() {
                 return Poll::Ready(Ok(offset));
             }
+            // then, encode buf as TLS frame in write_buffer ready to be written to socket
+            // TODO: should we store more than one TLS frame in write_buffer?
             this.write_buffer
                 .reserve_exact(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
             unsafe {
@@ -205,6 +207,8 @@ impl AsyncWrite for SnowyStream {
                     &mut this.write_buffer[TLS_RECORD_HEADER_LENGTH..],
                 )
                 .unwrap();
+            // Note: plaintext.len < ciphertext.n and typically len + AEAD_TAG_LENGTH = n
+            debug_assert_eq!(len + AEAD_TAG_LENGTH, n);
             offset += len;
             debug_assert!(offset <= buf.len());
             this.write_buffer[3..5].copy_from_slice(&(n as u16).to_be_bytes());
@@ -214,8 +218,8 @@ impl AsyncWrite for SnowyStream {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut this = self.get_mut();
-        // unimplemented!(); FIX:
         while this.write_offset != this.write_buffer.len() {
+            // should we try to poll_write the underlying more than once at all?
             match Pin::new(&mut this.socket).poll_write(cx, &this.write_buffer[this.write_offset..])
             {
                 Poll::Ready(r) => {
@@ -228,15 +232,22 @@ impl AsyncWrite for SnowyStream {
         }
         this.write_offset = 0;
         this.write_buffer.clear();
-        Pin::new(&mut this.socket).poll_flush(cx)
+        Pin::new(&mut this.socket).poll_flush(cx) // actually, tcp flush is a no-op
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if !self.state.writeable() {
-            // self.session.send_close_notify();
-            return Poll::Ready(Ok(()));
+        // self.state.shutdown_write();
+        // proceed even if state has already been not writable
+        // otherwise latter steps would be ignored in second poll calls
+        if self.state.writeable() {
+            self.state.shutdown_write();
         }
-        self.state.shutdown_write();
+        // TODO: https://www.openssl.org/docs/man1.0.2/man3/SSL_shutdown.html
+        // https://github.com/tokio-rs/tls/blob/56855b71661a9bf848c1a3c3f03ead6ac3f1b49f/tokio-rustls/src/client.rs#L235
+        // self.send_warning_alert_no_log(AlertDescription::CloseNotify);
+        // let alert = Message::build_alert(AlertLevel::Warning, rustls::AlertDescription::CloseNotify);
+
+        // per trait's doc, flush should be polled till ready before shutdown returns ready
         ready!(self.as_mut().poll_flush(cx))?;
         Pin::new(&mut self.socket).poll_shutdown(cx)
     }
