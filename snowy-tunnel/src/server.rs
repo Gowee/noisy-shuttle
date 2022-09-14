@@ -144,7 +144,6 @@ impl Server {
                     inbound.peer_addr().unwrap(),
                     outbound.peer_addr().unwrap()
                 );
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         }
 
@@ -154,13 +153,13 @@ impl Server {
         // Noise: <- e, ee
         let mut pong = [0u8; 5 + 48 + 24]; // 0 - 24 random padding
         let pad_len = thread_rng().gen_range(0..=24);
-        trace!("e, ee random pad length: {}", pad_len);
         rand::thread_rng().fill(&mut pong[5 + 48..5 + 48 + pad_len]);
         pong[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30 + pad_len as u8]);
         let len = responder
             .write_message(&[], &mut pong[5..])
             .expect("Valid NOISE state");
         debug_assert_eq!(len, 48);
+        trace!(pad_len, "e, ee in {:?}: {:x?}", inbound, &pong[5..5 + 48]);
         inbound.write_all(&pong[..5 + 48 + pad_len]).await?;
         // but, is uniform random length of a message of first a few ones a characteristic per se?
 

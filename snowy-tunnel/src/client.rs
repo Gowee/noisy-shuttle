@@ -8,10 +8,12 @@ use rustls::ProtocolVersion;
 use rustls::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tracing::warn;
 use tracing::{debug, trace};
 // use tokio_rustls::TlsConnector;
 
 use std::io;
+use std::mem::{self, MaybeUninit};
 use std::sync::Arc;
 
 use crate::utils::{parse_tls_plain_message, u16_from_be_slice};
@@ -34,7 +36,6 @@ pub struct Client {
 }
 
 impl Client {
-    #[allow(clippy::uninit_vec)]
     pub async fn connect(&self, mut stream: TcpStream) -> io::Result<SnowyStream> {
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
@@ -61,8 +62,12 @@ impl Client {
         )
         .expect("Valid TLS config");
 
-        let mut buf = Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
-        unsafe { buf.set_len(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH) };
+        let mut buf: Vec<MaybeUninit<u8>> =
+            Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
+        let mut buf: Vec<u8> = unsafe {
+            buf.set_len(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
+            mem::transmute(buf)
+        };
         let len = tlsconn.write_tls(&mut io::Cursor::new(&mut buf))?; // Write for Vec is dummy?
         unsafe { buf.set_len(len) };
         debug_assert!(!tlsconn.wants_write() & tlsconn.wants_read());
@@ -120,12 +125,30 @@ impl Client {
 
         // Noise: <- e, ee
         let mut pong = Vec::with_capacity(5 + 48 + 24); // 0..24 random padding
+                                                        // TODO: timeout
         read_tls_message(&mut stream, &mut pong)
             .await?
             .map_err(|_e| {
                 io::Error::new(io::ErrorKind::InvalidData, "First data frame not noise")
             })?;
+        if pong.len() < 5 + 48 {
+            warn!(
+                "Noise handshake {} <-> {} failed. Wrong key?",
+                stream.local_addr().unwrap(),
+                stream.peer_addr().unwrap()
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Noise handshake failed due to message length shorter than expected",
+            ));
+        }
         let e_ee: [u8; 48] = pong[5..5 + 48].try_into().unwrap();
+        trace!(
+            pad_len = pong.len() - (5 + 48),
+            "e, ee in {:?}: {:x?}",
+            stream,
+            &e_ee
+        );
         initiator
             .read_message(&e_ee, &mut [])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?; // TODO: allow recovery?
@@ -141,8 +164,12 @@ async fn tls12_handshake(
     stream: &mut TcpStream,
     stop_after_server_ccs: bool,
 ) -> io::Result<()> {
-    let mut buf = Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
-    unsafe { buf.set_len(buf.capacity()) }
+    let mut buf: Vec<MaybeUninit<u8>> =
+        Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
+    let mut buf: Vec<u8> = unsafe {
+        buf.set_len(buf.capacity());
+        mem::transmute(buf)
+    };
     let mut seen_ccs = false;
     loop {
         match (tlsconn.wants_read(), tlsconn.wants_write()) {

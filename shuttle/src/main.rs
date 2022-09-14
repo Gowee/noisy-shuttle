@@ -183,8 +183,6 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
         let client = client.clone();
         let opt = opt.clone();
         let preflighter = preflighter.clone();
-        // let preflighted = preflighter.get();
-        // let connection =
         // TODO: handle error
         tokio::spawn(handle_client_connection(
             client,
@@ -209,7 +207,7 @@ async fn handle_client_connection(
         Some(preflighter) => {
             let (s, t) = preflighter.get().await?;
             info!(
-                "snowy relay starts for {} (preflighted {} ago)",
+                "snowy relay starting for {} (preflighted {} ago)",
                 &client_addr,
                 t.elapsed().autofmt()
             );
@@ -227,7 +225,7 @@ async fn handle_client_connection(
             let s = TcpStream::connect(opt.remote_addr.as_str()).await?;
             let s = client.connect(s).await?;
             info!(
-                "snowy relay start for {} (handshaked within {})",
+                "snowy relay starting for {} (handshaked within {})",
                 &client_addr,
                 t.elapsed().autofmt()
             );
