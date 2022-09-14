@@ -1,11 +1,11 @@
 use blake2::{Blake2s256, Digest};
 use lazy_static::lazy_static;
 use rustls::internal::msgs::deframer::MessageDeframer;
-
 use snow::params::NoiseParams;
 use snow::TransportState;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tracing::{debug, trace};
 
 use futures::ready;
 use std::cmp;
@@ -113,12 +113,24 @@ impl AsyncRead for SnowyStream {
                         .noise
                         .read_message(&message.payload.0, &mut this.read_buffer)
                         .map_err(|e| {
+                            debug!(
+                                "noise read error on {:?}, message: {:#?}",
+                                this.socket, message
+                            );
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 format!("Noise failed to read message: {}", e),
                             )
                         })?;
                     this.read_buffer.truncate(len);
+                    trace!(
+                        pldlen = message.payload.0.len(),
+                        plainlen = len,
+                        "tls message ready for {:?}, type: {:?}, version: {:?}",
+                        this.socket,
+                        message.typ,
+                        message.version,
+                    );
                 } else {
                     // no ready tls frame, proceed to read the inner socket
                     break 'read_ready;
@@ -218,15 +230,23 @@ impl AsyncWrite for SnowyStream {
                         this.write_offset += n;
                         if n == 0 {
                             this.state.shutdown_write();
+                            debug!(
+                                "write zero, stream: {:?}, state: {:?}, buffered: {}/{}",
+                                this.socket,
+                                this.state,
+                                this.write_offset,
+                                this.write_buffer.len()
+                            );
                             return Poll::Ready(Err(io::Error::new(
                                 io::ErrorKind::WriteZero,
                                 "Write zero byte to underlying socket when a TLS frame is half-written",
                             )));
                         }
-                    },
+                    }
                     Poll::Ready(Err(e)) => {
+                        debug!("write socket error, stream: {:?}, state: {:?}, error: {:?}, buffered: {}/{}", this.socket, this.state, e, this.write_offset, this.write_buffer.len());
                         return Poll::Ready(Err(dbg!(e)));
-                    },
+                    }
                     Poll::Pending => {
                         return if offset == 0 {
                             Poll::Pending
@@ -265,6 +285,12 @@ impl AsyncWrite for SnowyStream {
             debug_assert!(offset <= buf.len());
             this.write_buffer[3..5].copy_from_slice(&(n as u16).to_be_bytes());
             this.write_buffer.truncate(TLS_RECORD_HEADER_LENGTH + n);
+            trace!(
+                plainlen = buf.len(),
+                msglen = this.write_buffer.len(),
+                "tls message constructed for {:?}",
+                this.socket
+            );
         }
     }
 

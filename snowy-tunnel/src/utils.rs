@@ -1,7 +1,7 @@
 use rustls::internal::msgs::codec::Reader;
 use rustls::internal::msgs::handshake::{
-    ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, ServerExtension,
-    ServerHelloPayload,
+    ClientExtension, ClientHelloPayload, HandshakeMessagePayload, HandshakePayload,
+    ServerExtension, ServerHelloPayload,
 };
 
 use rustls::internal::msgs::message::{Message, MessageError, MessagePayload, OpaqueMessage};
@@ -17,7 +17,7 @@ use std::task::{Context, Poll};
 
 use crate::common::{MAXIMUM_CIPHERTEXT_LENGTH, TLS_RECORD_HEADER_LENGTH};
 
-pub fn u16_from_slice(s: &[u8]) -> u16 {
+pub fn u16_from_be_slice(s: &[u8]) -> u16 {
     u16::from_be_bytes(<[u8; 2]>::try_from(s).unwrap())
 }
 
@@ -95,8 +95,8 @@ pub async fn read_tls_message(
     let mut header = [0xefu8; TLS_RECORD_HEADER_LENGTH];
     r.read_exact(&mut header).await?;
     let typ = ContentType::from(header[0]);
-    let ver = ProtocolVersion::from(u16_from_slice(&header[1..3]));
-    let len = u16_from_slice(&header[3..5]) as usize;
+    let ver = ProtocolVersion::from(u16_from_be_slice(&header[1..3]));
+    let len = u16_from_be_slice(&header[3..5]) as usize;
     // Copied from: https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L87
     // Reject undersize messages
     //  implemented per section 5.1 of RFC8446 (TLSv1.3)
@@ -198,18 +198,18 @@ pub fn get_server_tls_version(shp: &ServerHelloPayload) -> Option<ProtocolVersio
         .cloned()
 }
 
-// pub fn get_client_tls_versions(shp: &ClientHelloPayload) -> Option<&Vec<ProtocolVersion>> {
-//     shp.extensions
-//         .iter()
-//         .filter_map(|ext| {
-//             if let ClientExtension::SupportedVersions(vers) = ext {
-//                 Some(vers)
-//             } else {
-//                 None
-//             }
-//         })
-//         .next()
-// }
+pub fn get_client_tls_versions(shp: &ClientHelloPayload) -> Option<&Vec<ProtocolVersion>> {
+    shp.extensions
+        .iter()
+        .filter_map(|ext| {
+            if let ClientExtension::SupportedVersions(vers) = ext {
+                Some(vers)
+            } else {
+                None
+            }
+        })
+        .next()
+}
 
 // // https://stackoverflow.com/a/72461302/5488616
 // pub fn concat_arrays<T, const M: usize, const N: usize>(a: [T; M], b: [T; N]) -> [T; M + N] {

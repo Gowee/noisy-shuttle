@@ -4,8 +4,10 @@ use rustls::{HandshakeType, ProtocolVersion};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
+use tracing::{debug, trace};
 
 use std::io;
+use std::mem;
 use std::net::SocketAddr;
 use std::sync::Mutex;
 
@@ -13,8 +15,8 @@ use super::common::{SnowyStream, NOISE_PARAMS, PSKLEN};
 
 use crate::common::derive_psk;
 use crate::utils::{
-    get_server_tls_version, parse_tls_plain_message, read_tls_message, u16_from_slice,
-    TlsMessageExt,
+    get_client_tls_versions, get_server_tls_version, parse_tls_plain_message, read_tls_message,
+    u16_from_be_slice, TlsMessageExt,
 };
 
 #[derive(Debug)]
@@ -56,12 +58,14 @@ impl Server {
                 let s: (usize, [u8; 32]) = chp.session_id.into();
                 psk_e[32..].copy_from_slice(&s.1[..16]); // session id
 
-                // client_tls1_3 = get_client_tls_versions(chp)
-                //     .map(|vers| {
-                //         vers.iter()
-                //             .any(|&ver| ver == ProtocolVersion::TLSv1_3)
-                //     })
-                //     .unwrap_or(false);
+                let client_tls1_3 = get_client_tls_versions(&chp)
+                    .map(|vers| vers.iter().any(|&ver| ver == ProtocolVersion::TLSv1_3))
+                    .unwrap_or(false);
+                trace!(
+                    "client {} supports TLS 1.3: {}",
+                    inbound.peer_addr().unwrap(),
+                    client_tls1_3
+                );
             }
             None => {
                 return Err(ClientHelloInvalid { buf, io: inbound });
@@ -81,7 +85,7 @@ impl Server {
             if responder.read_message(&psk_e, &mut []).is_err() {
                 return Err(Unauthenticated { buf, io: inbound });
             }
-            rf.put(e, inbound.peer_addr().expect("TODO"));
+            rf.put(e, inbound.peer_addr().unwrap());
         }
         // Ref: https://tls12.xargs.org/
         //      https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L88
@@ -114,9 +118,19 @@ impl Server {
         match get_server_tls_version(&shp) {
             Some(ProtocolVersion::TLSv1_3) => {
                 // TLS 1.3: handshake done
+                debug!(
+                    "{} <-> {} negotiated TLS version: 1.3",
+                    inbound.peer_addr().unwrap(),
+                    outbound.peer_addr().unwrap()
+                );
             }
             _ => {
                 // TLS 1.2: continue handshake
+                debug!(
+                    "{} <-> {} negotiated TLS version: 1.2 or other",
+                    inbound.peer_addr().unwrap(),
+                    outbound.peer_addr().unwrap()
+                );
                 relay_until_handshake_finished(&mut inbound, &mut outbound).await?;
                 // force flush TCP before sending e, ee in a dirty way; TODO: fix client
                 // this prevents client TLS implmentation from catching too much data in buffer
@@ -125,18 +139,22 @@ impl Server {
                     inbound.write_all(&[]).await?;
                     inbound.set_nodelay(false)?;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                debug!(
+                    "{} <-> {} full handshake done",
+                    inbound.peer_addr().unwrap(),
+                    outbound.peer_addr().unwrap()
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         }
 
         // handshake done, drop connection to camouflage server
-        tokio::spawn(async move {
-            let _ = outbound.shutdown().await;
-        });
+        mem::drop(outbound);
 
         // Noise: <- e, ee
         let mut pong = [0u8; 5 + 48 + 24]; // 0 - 24 random padding
         let pad_len = thread_rng().gen_range(0..=24);
+        trace!("e, ee random pad length: {}", pad_len);
         rand::thread_rng().fill(&mut pong[5 + 48..5 + 48 + pad_len]);
         pong[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30 + pad_len as u8]);
         let len = responder
@@ -200,7 +218,7 @@ async fn copy_until_handshake_finished<'a>(
         read_half.read_exact(&mut header_buf).await?;
 
         // parse length
-        let data_size = u16_from_slice(&header_buf[3..5]) as usize;
+        let data_size = u16_from_be_slice(&header_buf[3..5]) as usize;
 
         // copy header and that much data
         write_half.write_all(&header_buf).await?;

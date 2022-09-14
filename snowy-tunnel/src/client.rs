@@ -1,17 +1,20 @@
 use rand::Rng;
 
 use rustls::internal::msgs::message::Message;
+use rustls::ClientConnection as RustlsClientConnection;
+use rustls::ContentType;
 use rustls::HandshakeType;
 use rustls::ProtocolVersion;
 use rustls::ServerName;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
+use tracing::{debug, trace};
+// use tokio_rustls::TlsConnector;
 
 use std::io;
 use std::sync::Arc;
 
-use crate::utils::parse_tls_plain_message;
+use crate::utils::{parse_tls_plain_message, u16_from_be_slice};
 
 use crate::utils::{
     get_server_tls_version, read_tls_message, HandshakeStateExt, NoCertificateVerification,
@@ -36,9 +39,9 @@ impl Client {
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
             .build_initiator()
-            .expect("Valid NOISE params");
+            .expect("Valid noise params");
         // Noise: -> psk, e
-        let psk_e = initiator.writen::<48>().expect("Valid NOISE state");
+        let psk_e = initiator.writen::<48>().expect("Valid noise state");
         let random = <[u8; 32]>::try_from(&psk_e[0..32]).unwrap();
         let mut session_id = [0u8; 32];
         session_id[..16].copy_from_slice(&psk_e[32..48]);
@@ -95,15 +98,21 @@ impl Client {
                 // In TLS 1.2, the handshake procedures are basically transparent. That is, an
                 // eavesdropper could verify the unencrypted signature against the camouflage
                 // servers' public key. So the camouflage server is requested every time.
-                let connector = TlsConnector::from(Arc::new(tlsconf.clone()));
-                tlsconn.read_tls(&mut io::Cursor::new(&mut buf))?;
-                let (socket, _tlsconn) = connector
-                    .connect_with(self.server_name.clone(), stream.take().unwrap(), |conn| {
-                        *conn = tlsconn
-                    })
-                    .await?
-                    .into_inner();
+
+                // let connector = TlsConnector::from(Arc::new(tlsconf.clone()));
+                // tlsconn.read_tls(&mut io::Cursor::new(&mut buf))?;
+                // let (socket, _tlsconn) = connector
+                //     .connect_with(self.server_name.clone(), stream.take().unwrap(), |conn| {
+                //         *conn = tlsconn
+                //     })
+                //     .await?
+                //     .into_inner();
+                // handshake()
                 // TLS1.2 handshake done
+                // feed previously read Server Hello
+                tlsconn.read_tls(&mut io::Cursor::new(&mut buf))?;
+                let mut socket = stream.take().unwrap();
+                tls12_handshake(&mut tlsconn, &mut socket, false).await?;
                 stream = Some(socket);
             }
         }
@@ -120,9 +129,93 @@ impl Client {
         initiator
             .read_message(&e_ee, &mut [])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?; // TODO: allow recovery?
-        let noise = initiator // noise handshake done
+        let noise = initiator
             .into_transport_mode()
-            .expect("NOISE handshake finished");
+            .expect("Noise handshake done");
         Ok(SnowyStream::new(stream, noise))
     }
+}
+
+async fn tls12_handshake(
+    tlsconn: &mut RustlsClientConnection,
+    stream: &mut TcpStream,
+    stop_after_server_ccs: bool,
+) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
+    unsafe { buf.set_len(buf.capacity()) }
+    let mut seen_ccs = false;
+    loop {
+        match (tlsconn.wants_read(), tlsconn.wants_write()) {
+            (_, true) => {
+                // flow: client -> server
+                // always prefer to write out over reading in, to avoid deadlock-like waiting
+                let len = tlsconn.write_tls(&mut io::Cursor::new(&mut buf)).unwrap();
+                // typically, multiple messages are written by a single call
+                trace!(
+                    first_protocol = u16_from_be_slice(&buf[1..3]),
+                    first_msglen = u16_from_be_slice(&buf[3..5]),
+                    totallen = len,
+                    "tls handshake {} => {}, first type: {:?}",
+                    stream.local_addr().unwrap(),
+                    stream.peer_addr().unwrap(),
+                    ContentType::from(buf[0]),
+                );
+                stream.write_all(&buf[..len]).await?;
+            }
+            (true, false) => {
+                // flow: client <- server
+                stream.read_exact(&mut buf[..5]).await?;
+                let len = u16_from_be_slice(&buf[3..5]) as usize;
+                stream.read_exact(&mut buf[5..5 + len]).await?;
+                trace!(
+                    protocol = u16_from_be_slice(&buf[1..3]),
+                    msglen = u16_from_be_slice(&buf[3..5]),
+                    "tls handshake {} <= {}, type: {:?}",
+                    stream.local_addr().unwrap(),
+                    stream.peer_addr().unwrap(),
+                    ContentType::from(buf[0]),
+                );
+                let n = tlsconn
+                    .read_tls(&mut io::Cursor::new(&mut buf[..5 + len]))
+                    .unwrap();
+                debug_assert_eq!(n, 5 + len);
+                tlsconn.process_new_packets().map_err(|e| {
+                    debug!(
+                        "tls state error when handshaking {} <-> {}: {:?}",
+                        stream.local_addr().unwrap(),
+                        stream.peer_addr().unwrap(),
+                        e
+                    );
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("TLS handshake state: {}", e),
+                    )
+                })?;
+                match ContentType::from(buf[0]) {
+                    ContentType::ChangeCipherSpec => {
+                        // after server ChangeCipherSpec, the final Handshake Finished message is encrypted
+                        // it can be used to carry other data
+                        seen_ccs = true;
+                        if stop_after_server_ccs {
+                            break;
+                        }
+                    }
+                    _ => {
+                        debug_assert_eq!(buf[0], ContentType::Handshake.get_u8());
+                        // by default, handshake is done after the Handshake Finished message
+                        if seen_ccs {
+                            break;
+                        }
+                    }
+                }
+            }
+            (false, false) => break,
+        }
+    }
+    trace!(
+        "tls handshake {} <-> {} done",
+        stream.local_addr().unwrap(),
+        stream.peer_addr().unwrap(),
+    );
+    Ok(())
 }

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use deadqueue::resizable::Queue;
 use structopt::StructOpt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -82,7 +82,7 @@ pub async fn handle_server_connection(
                     info!(tx, rx, "relay for {} closed", &client_addr);
                 }
                 Err(e) => {
-                    info!("relay for {} terminated with error {}", &client_addr, e);
+                    info!("relay for {} terminated with error {}:", &client_addr, e);
                 }
             }
             Ok(())
@@ -185,6 +185,7 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
         let preflighter = preflighter.clone();
         // let preflighted = preflighter.get();
         // let connection =
+        // TODO: handle error
         tokio::spawn(handle_client_connection(
             client,
             preflighter,
@@ -224,7 +225,7 @@ async fn handle_client_connection(
         None => {
             let t = Instant::now();
             let s = TcpStream::connect(opt.remote_addr.as_str()).await?;
-            let r = client.connect(s).await;
+            let s = client.connect(s).await?;
             info!(
                 "snowy relay start for {} (handshaked within {})",
                 &client_addr,
@@ -232,12 +233,12 @@ async fn handle_client_connection(
             );
             debug!(
                 local_in = &client_addr.to_string(),
-                local_out = &opt.remote_addr.to_string(),
+                local_out = s.as_inner().local_addr().unwrap().to_string(),
                 remote = opt.remote_addr.as_str(),
                 handshake = t.elapsed().as_secs_f32(),
                 "relay"
             );
-            r?
+            s
         }
     };
     let now = Instant::now();
@@ -275,14 +276,14 @@ async fn handle_client_connection(
             info!(
                 rx = a,
                 tx = b,
-                "connection from {} closed after {}",
+                "relay for {} closed after {}",
                 &client_addr,
                 now.elapsed().autofmt(),
             );
         }
         Err(e) => {
             info!(
-                "connection from {} terminated after {} with error: {:#?} ",
+                "relay for {} terminated after {} with error: {}",
                 &client_addr,
                 now.elapsed().autofmt(),
                 e,
@@ -362,7 +363,7 @@ impl Preflighter {
                 .resize(cmp::max(self.queue.capacity() - 1, self.min))
                 .await;
             debug!(
-                preflight_enqueued = self.queue.len(),
+                preflight_pending = self.queue.len(),
                 preflight_capacity = self.queue.capacity(),
                 "one idle ready connection timeout, decrease preflight",
             );
