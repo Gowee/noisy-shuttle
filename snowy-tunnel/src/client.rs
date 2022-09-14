@@ -116,9 +116,7 @@ impl Client {
             .map_err(|_e| {
                 io::Error::new(io::ErrorKind::InvalidData, "First data frame not noise")
             })?;
-        let e_ee: [u8; 48] = pong[5..5 + 48]
-            .try_into()
-            .unwrap();
+        let e_ee: [u8; 48] = pong[5..5 + 48].try_into().unwrap();
         initiator
             .read_message(&e_ee, &mut [])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?; // TODO: allow recovery?

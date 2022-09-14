@@ -3,7 +3,7 @@
 use anyhow::Result;
 use deadqueue::resizable::Queue;
 use structopt::StructOpt;
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -24,8 +24,8 @@ use crate::opt::{CltOpt, Opt, SvrOpt};
 use crate::utils::DurationExt;
 
 // preflighter params
-const CONNIDLE: usize = 120; // in secs
-const EMA_COEFF: f32 = 1.0 / 3.0;
+const PREFLIHGTER_CONNIDLE: usize = 120; // in secs
+const PREFLIHGTER_EMA_COEFF: f32 = 1.0 / 3.0;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -59,10 +59,7 @@ pub async fn run_server(opt: SvrOpt) -> Result<()> {
     while let Ok((inbound, client_addr)) = listener.accept().await {
         let server = server.clone();
         let opt = opt.clone();
-        tokio::spawn(async move {
-            let r = handle_server_connection(server, inbound, client_addr, opt).await;
-            info!("relay done with {}: {:?}", &client_addr, r);
-        });
+        tokio::spawn(handle_server_connection(server, inbound, client_addr, opt));
     }
     Ok(())
 }
@@ -80,9 +77,15 @@ pub async fn handle_server_connection(
         Ok(mut snowys) => {
             let mut outbound = TcpStream::connect(&opt.remote_addr).await?;
             info!("snowy relay: {} -> {}", &client_addr, &opt.remote_addr);
-            tokio::io::copy_bidirectional(&mut snowys, &mut outbound)
-                .await
-                .map(|_| ())
+            match tokio::io::copy_bidirectional(&mut snowys, &mut outbound).await {
+                Ok((tx, rx)) => {
+                    info!(tx, rx, "relay for {} closed", &client_addr);
+                }
+                Err(e) => {
+                    info!("relay for {} terminated with error {}", &client_addr, e);
+                }
+            }
+            Ok(())
         }
         Err(IoError(e)) => Err(e),
         Err(ReplayDetected {
@@ -146,7 +149,10 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
         &opt.preflight.0,
         &opt.preflight.1.unwrap_or(usize::MAX)
     );
-    debug!(connidle = CONNIDLE, aht_ema_coeff = EMA_COEFF);
+    debug!(
+        connidle = PREFLIHGTER_CONNIDLE,
+        aht_ema_coeff = PREFLIHGTER_EMA_COEFF
+    );
     let client = Arc::new(Client {
         key: derive_psk(opt.key.as_bytes()),
         server_name: opt.server_name.as_str().try_into().unwrap(),
@@ -173,101 +179,117 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
 
     let listener = TcpListener::bind(opt.listen_addr).await?;
 
-    while let Ok((mut inbound, client_addr)) = listener.accept().await {
+    while let Ok((inbound, client_addr)) = listener.accept().await {
         let client = client.clone();
         let opt = opt.clone();
         let preflighter = preflighter.clone();
         // let preflighted = preflighter.get();
         // let connection =
-        tokio::spawn(async move {
-            let mut snowys = match preflighter {
-                Some(preflighter) => {
-                    let (s, t) = preflighter.get().await?;
-                    info!(
-                        "snowy relay starts for {} (preflighted {} ago)",
-                        &client_addr,
-                        t.elapsed().autofmt()
-                    );
-                    debug!(
-                        local_in = &client_addr.to_string(),
-                        local_out = s.as_inner().local_addr().unwrap().to_string(),
-                        remote = &opt.remote_addr.to_string(),
-                        // preflighted = t.elapsed().as_secs_f32(),
-                        "relay"
-                    );
-                    s
-                }
-                None => {
-                    let t = Instant::now();
-                    let s = TcpStream::connect(opt.remote_addr.as_str()).await?;
-                    let r = client.connect(s).await;
-                    info!(
-                        "snowy relay start for {} (handshaked within {})",
-                        &client_addr,
-                        t.elapsed().autofmt()
-                    );
-                    debug!(
-                        local_in = &client_addr.to_string(),
-                        local_out = &opt.remote_addr.to_string(),
-                        remote = opt.remote_addr.as_str(),
-                        handshake = t.elapsed().as_secs_f32(),
-                        "relay"
-                    );
-                    r?
-                }
-            };
-            let now = Instant::now();
-            // let (mut ai, mut ao) = tokio::io::split(snowys);
-            // let (mut bi, mut bo) = inbound.into_split();
-            // let a = tokio::spawn(async move {
-            //     // let mut buf = vec![0u8; 10240];
-            //     // loop {
-            //     //     let len = ai.read(&mut buf).await.unwrap();
-            //     //     if len == 0 {
-            //     //         break;
-            //     //     }
-            //     //     sleep(Duration::from_secs(3)).await;
-            //     //     bo.write_all(&buf[..len]).await.unwrap();
-            //     // }
-            //     dbg!(tokio::io::copy(&mut ai, &mut bo).await).unwrap();
-            // });
-            // let b = tokio::spawn(async move {
-            //     // let mut buf = vec![0u8; 10240];
-            //     // loop {
-            //     //     let len = bi.read(&mut buf).await.unwrap();
-            //     //     if len == 0 {
-            //     //         break;
-            //     //     }
-            //     //     sleep(Duration::from_secs(3)).await;
-            //     //     ao.write_all(&buf[..len]).await.unwrap();
-            //     // }
-            //     dbg!(tokio::io::copy(&mut bi, &mut ao).await).unwrap();
-            // });
-            // a.await?;
-            // b.await?;
-            match tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await {
-                Ok((a, b)) => {
-                    info!(
-                        rx = a,
-                        tx = b,
-                        "connection from {} closed after {}",
-                        &client_addr,
-                        now.elapsed().autofmt(),
-                    );
-                }
-                Err(e) => {
-                    info!(
-                        "connection from {} terminated after {} with error: {:#?} ",
-                        &client_addr,
-                        now.elapsed().autofmt(),
-                        e,
-                    );
-                }
-            }
-            Ok::<(), io::Error>(())
-        });
+        tokio::spawn(handle_client_connection(
+            client,
+            preflighter,
+            inbound,
+            client_addr,
+            opt,
+        ));
     }
     Ok(())
+}
+
+#[instrument(level = "trace")]
+async fn handle_client_connection(
+    client: Arc<Client>,
+    preflighter: Option<Arc<Preflighter>>,
+    mut inbound: TcpStream,
+    client_addr: SocketAddr,
+    opt: Arc<CltOpt>,
+) -> io::Result<()> {
+    let mut snowys = match preflighter {
+        Some(preflighter) => {
+            let (s, t) = preflighter.get().await?;
+            info!(
+                "snowy relay starts for {} (preflighted {} ago)",
+                &client_addr,
+                t.elapsed().autofmt()
+            );
+            debug!(
+                local_in = &client_addr.to_string(),
+                local_out = s.as_inner().local_addr().unwrap().to_string(),
+                remote = &opt.remote_addr.to_string(),
+                // preflighted = t.elapsed().as_secs_f32(),
+                "relay"
+            );
+            s
+        }
+        None => {
+            let t = Instant::now();
+            let s = TcpStream::connect(opt.remote_addr.as_str()).await?;
+            let r = client.connect(s).await;
+            info!(
+                "snowy relay start for {} (handshaked within {})",
+                &client_addr,
+                t.elapsed().autofmt()
+            );
+            debug!(
+                local_in = &client_addr.to_string(),
+                local_out = &opt.remote_addr.to_string(),
+                remote = opt.remote_addr.as_str(),
+                handshake = t.elapsed().as_secs_f32(),
+                "relay"
+            );
+            r?
+        }
+    };
+    let now = Instant::now();
+    /*
+    // let (mut ai, mut ao) = tokio::io::split(snowys);
+    // let (mut bi, mut bo) = inbound.into_split();
+    // let a = tokio::spawn(async move {
+    //     // let mut buf = vec![0u8; 10240];
+    //     // loop {
+    //     //     let len = ai.read(&mut buf).await.unwrap();
+    //     //     if len == 0 {
+    //     //         break;
+    //     //     }
+    //     //     sleep(Duration::from_secs(3)).await;
+    //     //     bo.write_all(&buf[..len]).await.unwrap();
+    //     // }
+    //     dbg!(tokio::io::copy(&mut ai, &mut bo).await).unwrap();
+    // });
+    // let b = tokio::spawn(async move {
+    //     // let mut buf = vec![0u8; 10240];
+    //     // loop {
+    //     //     let len = bi.read(&mut buf).await.unwrap();
+    //     //     if len == 0 {
+    //     //         break;
+    //     //     }
+    //     //     sleep(Duration::from_secs(3)).await;
+    //     //     ao.write_all(&buf[..len]).await.unwrap();
+    //     // }
+    //     dbg!(tokio::io::copy(&mut bi, &mut ao).await).unwrap();
+    // });
+    // a.await?;
+    // b.await?; */
+    match tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await {
+        Ok((a, b)) => {
+            info!(
+                rx = a,
+                tx = b,
+                "connection from {} closed after {}",
+                &client_addr,
+                now.elapsed().autofmt(),
+            );
+        }
+        Err(e) => {
+            info!(
+                "connection from {} terminated after {} with error: {:#?} ",
+                &client_addr,
+                now.elapsed().autofmt(),
+                e,
+            );
+        }
+    }
+    Ok::<(), io::Error>(())
 }
 
 #[derive(Debug)]
@@ -314,7 +336,8 @@ impl Preflighter {
                 let r = client.connect(s?).await;
                 if r.is_ok() {
                     let mut aht = average_handshake_time.lock().unwrap();
-                    *aht = t.elapsed().as_secs_f32() * EMA_COEFF + *aht * (1.0 - EMA_COEFF);
+                    *aht = t.elapsed().as_secs_f32() * PREFLIHGTER_EMA_COEFF
+                        + *aht * (1.0 - PREFLIHGTER_EMA_COEFF);
                     debug!(aht = *aht, "update average handshake time"); // TODO: drop lock before logging
                 }
                 r
@@ -333,7 +356,7 @@ impl Preflighter {
     #[instrument(level = "trace")]
     pub async fn get(&self) -> io::Result<(SnowyStream, Instant)> {
         let (h, t1) = self.queue.pop().await;
-        if t1.elapsed().as_secs() as usize > CONNIDLE {
+        if t1.elapsed().as_secs() as usize > PREFLIHGTER_CONNIDLE {
             debug_assert!(self.queue.capacity() > 0);
             self.queue
                 .resize(cmp::max(self.queue.capacity() - 1, self.min))
@@ -380,7 +403,7 @@ impl Preflighter {
                 Ok((s, t1))
             }
             Err(e) => {
-                warn!(e = e.to_string());
+                warn!("preflighter got error when handshaking: {}", e);
                 Err(e)
             }
         }

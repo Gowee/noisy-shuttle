@@ -125,6 +125,7 @@ impl Server {
                     inbound.write_all(&[]).await?;
                     inbound.set_nodelay(false)?;
                 }
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         }
 
@@ -142,14 +143,12 @@ impl Server {
             .write_message(&[], &mut pong[5..])
             .expect("Valid NOISE state");
         debug_assert_eq!(len, 48);
-        inbound
-            .write_all(&pong[..5 + 48 + pad_len])
-            .await?;
+        inbound.write_all(&pong[..5 + 48 + pad_len]).await?;
         // but, is uniform random length of a message of first a few ones a characteristic per se?
 
         let responder = responder
             .into_transport_mode()
-            .expect("NOISE handshake finished");
+            .expect("NOISE handshake done");
         Ok(SnowyStream::new(inbound, responder))
     }
 }

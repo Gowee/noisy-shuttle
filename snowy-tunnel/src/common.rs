@@ -112,7 +112,12 @@ impl AsyncRead for SnowyStream {
                     let len = this
                         .noise
                         .read_message(&message.payload.0, &mut this.read_buffer)
-                        .expect("TODO");
+                        .map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("Noise failed to read message: {}", e),
+                            )
+                        })?;
                     this.read_buffer.truncate(len);
                 } else {
                     // no ready tls frame, proceed to read the inner socket
@@ -136,6 +141,16 @@ impl AsyncRead for SnowyStream {
                         //    If no data was read (buf.filled().len() is unchanged), it implies
                         //    that EOF has been reached.
                         this.state.shutdown_read();
+                        if this.tls_deframer.has_pending() {
+                            // ready frames in tls_deframer has been drained before reaching here
+                            // so pending indicates uncompleted frame
+                            debug_assert!(this.tls_deframer.frames.is_empty());
+                            dbg!(this.tls_deframer.desynced);
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "Underlaying socket EoF when a TLS frame half-read",
+                            )));
+                        }
                         break 'read_more;
                     }
                     // proceed to parse TLS frames
@@ -153,7 +168,7 @@ impl AsyncRead for SnowyStream {
                         }
                         _ => {}
                     }
-                    return Poll::Ready(Err(err));
+                    return Poll::Ready(dbg!(Err(err)));
                 }
             }
         }
@@ -198,14 +213,20 @@ impl AsyncWrite for SnowyStream {
                 match Pin::new(&mut this.socket)
                     .poll_write(cx, &this.write_buffer[this.write_offset..])
                 {
-                    Poll::Ready(r) => {
-                        let n = r?;
+                    Poll::Ready(Ok(n)) => {
+                        // let n = r?;
                         this.write_offset += n;
                         if n == 0 {
-                            // TODO: should shutdown_write?
-                            return Poll::Ready(Ok(0));
+                            this.state.shutdown_write();
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::WriteZero,
+                                "Write zero byte to underlying socket when a TLS frame is half-written",
+                            )));
                         }
-                    }
+                    },
+                    Poll::Ready(Err(e)) => {
+                        return Poll::Ready(Err(dbg!(e)));
+                    },
                     Poll::Pending => {
                         return if offset == 0 {
                             Poll::Pending
@@ -249,7 +270,7 @@ impl AsyncWrite for SnowyStream {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut this = self.get_mut();
-        while this.write_offset != this.write_buffer.len() {
+        while this.write_offset < this.write_buffer.len() {
             // should we try to poll_write the underlying more than once at all?
             match Pin::new(&mut this.socket).poll_write(cx, &this.write_buffer[this.write_offset..])
             {
