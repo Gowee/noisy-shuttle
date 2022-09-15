@@ -26,6 +26,9 @@ pub const MAXIMUM_CIPHERTEXT_LENGTH: usize = 2usize.pow(14); // 2**14B = 16KiB <
 pub const AEAD_TAG_LENGTH: usize = 16; // show::constants::TAGLEN
 pub const MAXIMUM_PLAINTEXT_LENGTH: usize = MAXIMUM_CIPHERTEXT_LENGTH - AEAD_TAG_LENGTH;
 pub const PSKLEN: usize = 32; // snow::constants::PSKLEN;
+
+pub const DEFAULT_ALPN_PROTOCOLS: [&[u8]; 2] = [b"http/1.1".as_slice(), b"http/2".as_slice()];
+
 const CONTEXT: &[u8] = b"the secure tunnel under snow";
 
 // #[derive(Debug)]
@@ -157,7 +160,7 @@ impl AsyncRead for SnowyStream {
                             // ready frames in tls_deframer has been drained before reaching here
                             // so pending indicates uncompleted frame
                             debug_assert!(this.tls_deframer.frames.is_empty());
-                            dbg!(this.tls_deframer.desynced);
+                            trace!(this.tls_deframer.desynced);
                             return Poll::Ready(Err(io::Error::new(
                                 io::ErrorKind::UnexpectedEof,
                                 "Underlaying socket EoF when a TLS frame half-read",
@@ -245,7 +248,7 @@ impl AsyncWrite for SnowyStream {
                     }
                     Poll::Ready(Err(e)) => {
                         debug!("write socket error, stream: {:?}, state: {:?}, error: {:?}, buffered: {}/{}", this.socket, this.state, e, this.write_offset, this.write_buffer.len());
-                        return Poll::Ready(Err(dbg!(e)));
+                        return Poll::Ready(Err(e));
                     }
                     Poll::Pending => {
                         return if offset == 0 {

@@ -1,8 +1,9 @@
+use ja3_rustls::Ja3;
 use rand::Rng;
-
+use rustls::internal::msgs::enums::ExtensionType;
 use rustls::internal::msgs::message::Message;
 use rustls::ClientConnection as RustlsClientConnection;
-use rustls::ContentType;
+use rustls::ContentType as TlsContentType;
 use rustls::HandshakeType;
 use rustls::ProtocolVersion;
 use rustls::ServerName;
@@ -10,13 +11,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::warn;
 use tracing::{debug, trace};
-// use tokio_rustls::TlsConnector;
 
 use std::io;
 use std::mem::{self, MaybeUninit};
 use std::sync::Arc;
 
-use crate::utils::{parse_tls_plain_message, u16_from_be_slice};
+use crate::utils::{overwrite_client_hello_with_ja3, parse_tls_plain_message, u16_from_be_slice};
 
 use crate::utils::{
     get_server_tls_version, read_tls_message, HandshakeStateExt, NoCertificateVerification,
@@ -24,7 +24,8 @@ use crate::utils::{
 };
 
 use super::common::{
-    SnowyStream, MAXIMUM_CIPHERTEXT_LENGTH, NOISE_PARAMS, PSKLEN, TLS_RECORD_HEADER_LENGTH,
+    SnowyStream, DEFAULT_ALPN_PROTOCOLS, MAXIMUM_CIPHERTEXT_LENGTH, NOISE_PARAMS, PSKLEN,
+    TLS_RECORD_HEADER_LENGTH,
 };
 
 #[derive(Debug, Clone)]
@@ -32,6 +33,7 @@ pub struct Client {
     pub key: [u8; PSKLEN],
     // pub remote_addr: SocketAddr,
     pub server_name: ServerName,
+    pub ja3: Option<Ja3>,
     // pub verify_tls: bool,
 }
 
@@ -49,23 +51,46 @@ impl Client {
         // pad to make it of a typical size
         rand::thread_rng().fill(&mut session_id[16..]);
 
-        let tlsconf = rustls::ClientConfig::builder()
+        // TODO: option for verifying camouflage cert
+        let mutch = match self.ja3 {
+            Some(ref ja3) => Some({
+                let ja3 = ja3.clone();
+                move |msg: &mut Message| {
+                    dbg!("!!!!!!!!!");
+                    dbg!("!!!!!!!!!");
+                    dbg!(&msg);
+                    overwrite_client_hello_with_ja3(msg, &ja3, true, true)
+                }
+            }),
+            None => None,
+        };
+        let mut tlsconf = rustls::ClientConfig::builder()
             .with_safe_defaults()
             .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
             .with_no_client_auth();
+        if let Some(ref ja3) = self.ja3 {
+            if ja3
+                .extensions_as_typed()
+                .any(|ext| ext == ExtensionType::ALProtocolNegotiation)
+            {
+                // It is necessary to add it conf. Only adding it to allowed_unsolicited_extensions
+                // resulted in TLS client rejection when ALPN is negeotiated.
+                tlsconf.alpn_protocols = Vec::from(DEFAULT_ALPN_PROTOCOLS.map(|p| Vec::from(p)));
+            }
+        }
         let mut tlsconn = rustls::ClientConnection::new_with(
             Arc::new(tlsconf.clone()),
             self.server_name.clone(),
             random.into(),
             session_id.as_slice().into(),
-            None::<fn(&mut Message)>,
+            mutch,
         )
         .expect("Valid TLS config");
 
         let mut buf: Vec<MaybeUninit<u8>> =
             Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
         let mut buf: Vec<u8> = unsafe {
-            buf.set_len(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
+            buf.set_len(buf.capacity());
             mem::transmute(buf)
         };
         let len = tlsconn.write_tls(&mut io::Cursor::new(&mut buf))?; // Write for Vec is dummy?
@@ -83,7 +108,6 @@ impl Client {
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "Not or invalid Server Hello")
             })?;
-        let mut stream = Some(stream);
         // server negotiated TLS version
         match get_server_tls_version(&shp) {
             Some(ProtocolVersion::TLSv1_3) => {
@@ -104,24 +128,12 @@ impl Client {
                 // eavesdropper could verify the unencrypted signature against the camouflage
                 // servers' public key. So the camouflage server is requested every time.
 
-                // let connector = TlsConnector::from(Arc::new(tlsconf.clone()));
-                // tlsconn.read_tls(&mut io::Cursor::new(&mut buf))?;
-                // let (socket, _tlsconn) = connector
-                //     .connect_with(self.server_name.clone(), stream.take().unwrap(), |conn| {
-                //         *conn = tlsconn
-                //     })
-                //     .await?
-                //     .into_inner();
-                // handshake()
-                // TLS1.2 handshake done
                 // feed previously read Server Hello
                 tlsconn.read_tls(&mut io::Cursor::new(&mut buf))?;
-                let mut socket = stream.take().unwrap();
-                tls12_handshake(&mut tlsconn, &mut socket, false).await?;
-                stream = Some(socket);
+                tls12_handshake(&mut tlsconn, &mut stream, false).await?;
+                // TLS1.2 handshake done
             }
         }
-        let mut stream = stream.unwrap();
 
         // Noise: <- e, ee
         let mut pong = Vec::with_capacity(5 + 48 + 24); // 0..24 random padding
@@ -185,7 +197,7 @@ async fn tls12_handshake(
                     "tls handshake {} => {}, first type: {:?}",
                     stream.local_addr().unwrap(),
                     stream.peer_addr().unwrap(),
-                    ContentType::from(buf[0]),
+                    TlsContentType::from(buf[0]),
                 );
                 stream.write_all(&buf[..len]).await?;
             }
@@ -200,7 +212,7 @@ async fn tls12_handshake(
                     "tls handshake {} <= {}, type: {:?}",
                     stream.local_addr().unwrap(),
                     stream.peer_addr().unwrap(),
-                    ContentType::from(buf[0]),
+                    TlsContentType::from(buf[0]),
                 );
                 let n = tlsconn
                     .read_tls(&mut io::Cursor::new(&mut buf[..5 + len]))
@@ -218,8 +230,8 @@ async fn tls12_handshake(
                         format!("TLS handshake state: {}", e),
                     )
                 })?;
-                match ContentType::from(buf[0]) {
-                    ContentType::ChangeCipherSpec => {
+                match TlsContentType::from(buf[0]) {
+                    TlsContentType::ChangeCipherSpec => {
                         // after server ChangeCipherSpec, the final Handshake Finished message is encrypted
                         // it can be used to carry other data
                         seen_ccs = true;
@@ -228,7 +240,7 @@ async fn tls12_handshake(
                         }
                     }
                     _ => {
-                        debug_assert_eq!(buf[0], ContentType::Handshake.get_u8());
+                        debug_assert_eq!(buf[0], TlsContentType::Handshake.get_u8());
                         // by default, handshake is done after the Handshake Finished message
                         if seen_ccs {
                             break;

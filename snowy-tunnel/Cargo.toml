@@ -16,3 +16,4 @@ rand = "0.8"
 blake2 = "0.10"
 tracing = "0.1"
 lru = "0.7"
+ja3-rustls = { version = "0.0", features = ["md5-string"] }

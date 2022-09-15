@@ -1,15 +1,18 @@
-use rustls::internal::msgs::codec::Reader;
+use hex_literal::hex;
+use ja3_rustls::Ja3;
+use rustls::internal::msgs::base::Payload;
+use rustls::internal::msgs::codec::{Codec, Reader};
+use rustls::internal::msgs::enums::ExtensionType;
 use rustls::internal::msgs::handshake::{
     ClientExtension, ClientHelloPayload, HandshakeMessagePayload, HandshakePayload,
-    ServerExtension, ServerHelloPayload,
+    ServerExtension, ServerHelloPayload, UnknownExtension,
 };
-
 use rustls::internal::msgs::message::{Message, MessageError, MessagePayload, OpaqueMessage};
-use rustls::{ContentType, Error as RustlsError, ProtocolVersion};
+use rustls::{ContentType as TlsContentType, Error as RustlsError, HandshakeType, ProtocolVersion};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
+use tracing::{debug, trace};
 
-use tokio::{self};
-
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::io::{self, Read};
 use std::pin::Pin;
@@ -94,14 +97,14 @@ pub async fn read_tls_message(
 ) -> io::Result<Result<(), MessageError>> {
     let mut header = [0xefu8; TLS_RECORD_HEADER_LENGTH];
     r.read_exact(&mut header).await?;
-    let typ = ContentType::from(header[0]);
+    let typ = TlsContentType::from(header[0]);
     let ver = ProtocolVersion::from(u16_from_be_slice(&header[1..3]));
     let len = u16_from_be_slice(&header[3..5]) as usize;
     // Copied from: https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L87
     // Reject undersize messages
     //  implemented per section 5.1 of RFC8446 (TLSv1.3)
     //              per section 6.2.1 of RFC5246 (TLSv1.2)
-    if typ != ContentType::ApplicationData && len == 0 {
+    if typ != TlsContentType::ApplicationData && len == 0 {
         return Ok(Err(MessageError::IllegalLength));
     }
     // Reject oversize messages
@@ -109,7 +112,7 @@ pub async fn read_tls_message(
         return Ok(Err(MessageError::IllegalLength));
     }
     // Don't accept any new content-types.
-    if let ContentType::Unknown(_) = typ {
+    if let TlsContentType::Unknown(_) = typ {
         return Ok(Err(MessageError::IllegalContentType));
     }
     match ver {
@@ -146,11 +149,26 @@ pub fn parse_tls_plain_message(buf: &[u8]) -> Result<Message, RustlsError> {
 // }
 
 pub trait TlsMessageExt {
+    fn as_client_hello_payload_mut(&mut self) -> Option<&mut ClientHelloPayload>;
     fn into_client_hello_payload(self) -> Option<ClientHelloPayload>;
     fn into_server_hello_payload(self) -> Option<ServerHelloPayload>;
 }
 
 impl TlsMessageExt for Message {
+    fn as_client_hello_payload_mut(&mut self) -> Option<&mut ClientHelloPayload> {
+        match self.payload {
+            MessagePayload::Handshake {
+                parsed:
+                    HandshakeMessagePayload {
+                        payload: HandshakePayload::ClientHello(ref mut chp),
+                        ..
+                    },
+                ..
+            } => Some(chp),
+            _ => None,
+        }
+    }
+
     fn into_client_hello_payload(self) -> Option<ClientHelloPayload> {
         if let MessagePayload::Handshake {
             parsed:
@@ -233,3 +251,113 @@ pub fn get_client_tls_versions(shp: &ClientHelloPayload) -> Option<&Vec<Protocol
 //         self.as_nanos() * coeff
 //     }
 // }
+
+/// Apply a JA3 fingerprint to a ClientHello [`Message`].
+///
+/// Cipher suites, curvres, and EC point formats are simply overwritten with the those specified by
+/// a JA3. For TLS extensions, the function manages to match the sort order, **optionally** add
+/// empty or hardcoded dummy records for those not in message yet but listed in JA3, and
+/// **optionally** drop existing ones from client hello payload if they are not present in JA3.
+///
+/// It returns a list of allowed unsolicited server extensions matched with the updated message.
+///
+/// # Note
+/// It is caller's responsibility to ensure that the message constitutes a valid ClientHello. Otherwise,
+/// only the protocol version in the message header is overwritten.
+pub fn overwrite_client_hello_with_ja3(
+    msg: &mut Message,
+    ja3: &Ja3,
+    add_empty_if_extension_not_in_message: bool,
+    drop_extensions_not_in_ja3: bool,
+) -> Option<Vec<ExtensionType>> {
+    use ClientExtension::*;
+    let mut allowed_unsolicited_extensions = vec![ExtensionType::RenegotiationInfo];
+    trace!("overwrite client hello of {:?} with ja3 {:?}", msg, ja3);
+    msg.version = ja3.version_to_typed();
+    if let MessagePayload::Handshake {
+        ref mut parsed,
+        ref mut encoded,
+    } = msg.payload
+    {
+        if let HandshakeMessagePayload {
+            payload: HandshakePayload::ClientHello(ref mut chp),
+            ..
+        } = parsed
+        {
+            chp.cipher_suites = ja3.ciphers_as_typed().collect();
+            // chp.client_version = ja3.version_as_typed(); // version in extension are not handled
+            for extension in chp.extensions.iter_mut() {
+                match extension {
+                    NamedGroups(groups) => {
+                        *groups = ja3.curves_as_typed().collect();
+                    }
+                    ECPointFormats(formats) => {
+                        *formats = ja3.point_formats_as_typed().collect();
+                    }
+                    _ => {}
+                }
+            }
+            // try to match extension order
+            let mut new_extensions = Vec::with_capacity(if drop_extensions_not_in_ja3 {
+                ja3.extensions.len()
+            } else {
+                chp.extensions.len()
+            });
+            let mut extmap: HashMap<u16, &ClientExtension> = chp
+                .extensions
+                .iter()
+                .map(|extension| (extension.get_type().get_u16(), extension))
+                .collect();
+            for &exttyp in ja3.extensions.iter() {
+                match extmap.remove(&exttyp) {
+                    Some(ext) => new_extensions.push(ext.to_owned()),
+                    None => {
+                        if !add_empty_if_extension_not_in_message {
+                            break;
+                        }
+                        debug!(
+                        "ja3 overwiting: missing extension {:?} in original chp, add an empty one",
+                        ExtensionType::from(exttyp)
+                    );
+                        // Some extension expect vectored struct, we cannot just set empty.
+                        let extpld = match exttyp {
+                            // ALPN: http/1.1 + h2
+                            0x0010 => {
+                                panic!("Expect ALPN present in message if it is listed in JA3")
+                                // allowed_unsolicited_extensions
+                                //     .push(ExtensionType::ALProtocolNegotiation);
+                                // Vec::from(hex!("000c08687474702f312e31026832"))
+                            }
+                            // Renegotiation Info: still empty, but an additional length field
+                            0xff01 => Vec::from(hex!("00")),
+
+                            _ => vec![],
+                        };
+                        let ext = ClientExtension::Unknown(UnknownExtension {
+                            typ: ExtensionType::from(exttyp),
+                            payload: Payload(extpld),
+                        });
+                        new_extensions.push(ext);
+                        // Codec works fine with UnknownExtension
+                    }
+                }
+            }
+            if !extmap.is_empty() {
+                debug!("ja3 overwriting: extension {:?} in original chp not present in ja3, prepend to end: {}", extmap, !drop_extensions_not_in_ja3);
+                if !drop_extensions_not_in_ja3 {
+                    // there might be some extensions in CHP that are not present in ja3
+                    new_extensions.extend(extmap.into_iter().map(|(_typ, ext)| ext.to_owned()));
+                }
+            }
+            chp.extensions = new_extensions;
+            // msg.payload = MessagePayload::handshake(HandshakeMessagePayload {
+            //     typ: HandshakeType::ClientHello,
+            //     payload: HandshakePayload::ClientHello(*chp),
+            // });
+        }
+        // Payload are stored twice in struct: one typed and one bytes. Both (or at least the
+        // latter) needs overwriting.
+        *encoded = Payload::new(parsed.get_encoding());
+    }
+    Some(allowed_unsolicited_extensions)
+}

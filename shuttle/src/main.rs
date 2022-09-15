@@ -27,6 +27,9 @@ use crate::utils::DurationExt;
 const PREFLIHGTER_CONNIDLE: usize = 120; // in secs
 const PREFLIHGTER_EMA_COEFF: f32 = 1.0 / 3.0;
 
+const JA3: &'static str = "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-17513-21,29-23-24,0";
+// "771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-34-51-43-13-45-28-21,29-23-24-25-256-257,0";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -156,6 +159,7 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     let client = Arc::new(Client {
         key: derive_psk(opt.key.as_bytes()),
         server_name: opt.server_name.as_str().try_into().unwrap(),
+        ja3: Some(JA3.parse().unwrap()),
     });
     let opt = Arc::new(opt);
 
@@ -240,35 +244,6 @@ async fn handle_client_connection(
         }
     };
     let now = Instant::now();
-    /*
-    // let (mut ai, mut ao) = tokio::io::split(snowys);
-    // let (mut bi, mut bo) = inbound.into_split();
-    // let a = tokio::spawn(async move {
-    //     // let mut buf = vec![0u8; 10240];
-    //     // loop {
-    //     //     let len = ai.read(&mut buf).await.unwrap();
-    //     //     if len == 0 {
-    //     //         break;
-    //     //     }
-    //     //     sleep(Duration::from_secs(3)).await;
-    //     //     bo.write_all(&buf[..len]).await.unwrap();
-    //     // }
-    //     dbg!(tokio::io::copy(&mut ai, &mut bo).await).unwrap();
-    // });
-    // let b = tokio::spawn(async move {
-    //     // let mut buf = vec![0u8; 10240];
-    //     // loop {
-    //     //     let len = bi.read(&mut buf).await.unwrap();
-    //     //     if len == 0 {
-    //     //         break;
-    //     //     }
-    //     //     sleep(Duration::from_secs(3)).await;
-    //     //     ao.write_all(&buf[..len]).await.unwrap();
-    //     // }
-    //     dbg!(tokio::io::copy(&mut bi, &mut ao).await).unwrap();
-    // });
-    // a.await?;
-    // b.await?; */
     match tokio::io::copy_bidirectional(&mut snowys, &mut inbound).await {
         Ok((a, b)) => {
             info!(

@@ -6,4 +6,5 @@ members = [
 ]
 
 [patch.crates-io]
+# rustls = { path = "../rustls-mod/rustls" }
 rustls = { git = "https://github.com/gowee/rustls-mod.git" }
