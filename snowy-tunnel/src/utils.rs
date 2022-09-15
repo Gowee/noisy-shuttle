@@ -8,11 +8,11 @@ use rustls::internal::msgs::handshake::{
     ServerExtension, ServerHelloPayload, UnknownExtension,
 };
 use rustls::internal::msgs::message::{Message, MessageError, MessagePayload, OpaqueMessage};
-use rustls::{ContentType as TlsContentType, Error as RustlsError, HandshakeType, ProtocolVersion};
+use rustls::{ContentType as TlsContentType, Error as RustlsError, ProtocolVersion};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tracing::{debug, trace};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io::{self, Read};
 use std::pin::Pin;
@@ -273,6 +273,7 @@ pub fn overwrite_client_hello_with_ja3(
     drop_extensions_not_in_ja3: bool,
 ) -> Option<Vec<ExtensionType>> {
     use ExtensionType::*;
+    #[allow(unused_mut)]
     let mut allowed_unsolicited_extensions = vec![ExtensionType::RenegotiationInfo];
     trace!("overwrite client hello of {:?} with ja3 {:?}", msg, ja3);
     msg.version = ja3.version_to_typed();
@@ -352,6 +353,10 @@ pub fn overwrite_client_hello_with_ja3(
                                 pad_per_rfc7685 = true;
                                 vec![]
                             }
+                            // Compress Certificate: Rustls does not support it.
+                            // Chrome use 02 00 02 (brotli).
+                            // By setting it non-empty, we risk at TLS negotiation error.
+                            ExtensionType::Unknown(0x001b) => Vec::from(hex!("020002")),
                             _ => vec![],
                         };
                         let ext = ClientExtension::Unknown(UnknownExtension {
@@ -372,21 +377,12 @@ pub fn overwrite_client_hello_with_ja3(
             }
             chp.extensions = new_extensions;
         }
-        dbg!(pad_per_rfc7685);
         if pad_per_rfc7685 {
             // previous steps ensure padding header is included already
             let pldlen = parsed.get_encoding().len();
-            dbg!(pldlen);
-            let vacantlen = RFC7685_PADDING_TARGET.saturating_sub(pldlen);
-            dbg!(vacantlen);
-            if vacantlen != 0 {
-                // let padlen = if vacantlen > 4 {
-                //     // 4: payload header length
-                //     vacantlen - 4
-                // } else {
-                //     0
-                // };
-                // dbg!(padlen);
+            let padlen = RFC7685_PADDING_TARGET.saturating_sub(pldlen);
+            debug!(padlen, "ja3 overwiting: apply rfc7685 padding");
+            if padlen != 0 {
                 if let HandshakeMessagePayload {
                     payload: HandshakePayload::ClientHello(ref mut chp),
                     ..
@@ -398,15 +394,15 @@ pub fn overwrite_client_hello_with_ja3(
                             payload,
                         }) = extension
                         {
-                            payload.0.resize(vacantlen, 0);
+                            payload.0.resize(padlen, 0);
                             break;
                         }
                     }
                 }
             }
-            // TODO: strip padding if final length > 512 + 4?
+            // TODO: strip padding if final length >= 512 + 4?
         }
-        dbg!(parsed.get_encoding().len());
+        // TODO: add GREASE
         // Payload are stored twice in struct: one typed and one bytes. Both (or at least the
         // latter) needs overwriting.
         *encoded = Payload::new(parsed.get_encoding());

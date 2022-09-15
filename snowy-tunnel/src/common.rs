@@ -183,7 +183,8 @@ impl AsyncRead for SnowyStream {
                         }
                         _ => {}
                     }
-                    return Poll::Ready(dbg!(Err(err)));
+                    debug!("read socket error, stream: {:?}, state: {:?}, error: {:?}, tls_frames: {:?}, buffer: PRIVATE, desynced: {:?}", this.socket, this.state, err, this.tls_deframer.frames, this.tls_deframer.desynced);
+                    return Poll::Ready(Err(err));
                 }
             }
         }

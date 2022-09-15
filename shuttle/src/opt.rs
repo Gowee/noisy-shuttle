@@ -1,3 +1,4 @@
+use ja3_rustls::Ja3;
 use structopt::clap::AppSettings::{ColoredHelp, DeriveDisplayOrder};
 use structopt::StructOpt;
 
@@ -30,9 +31,13 @@ pub struct CltOpt {
     #[structopt(name = "KEY")]
     pub key: String,
 
-    /// Number or range of connections to establish in advance (shorter perceivable delay, higher possibility of being suspected)
-    #[structopt(default_value = "0", parse(try_from_str = parse_preflight_bounds))]
+    /// Number or range of connections to establish in advance (shortening perceivable delay with higher possibility of being suspected)
+    #[structopt(short ="p", long = "preflight", default_value = "0", parse(try_from_str = parse_preflight_bounds))]
     pub preflight: (usize, Option<usize>),
+
+    /// JA3 TLS fingerprint to apply to ClientHello (possbily resulted in handshake error due to unsupported algos negotiated)
+    #[structopt(long = "ja3", name = "ja3")]
+    pub ja3: Option<Ja3>,
 }
 
 #[derive(Debug, Clone, StructOpt)]

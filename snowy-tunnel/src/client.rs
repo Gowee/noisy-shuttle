@@ -51,19 +51,11 @@ impl Client {
         // pad to make it of a typical size
         rand::thread_rng().fill(&mut session_id[16..]);
 
+        let mutch = self.ja3.as_ref().map(|ja3| {
+            let ja3 = ja3.clone();
+            move |msg: &mut Message| overwrite_client_hello_with_ja3(msg, &ja3, true, true)
+        });
         // TODO: option for verifying camouflage cert
-        let mutch = match self.ja3 {
-            Some(ref ja3) => Some({
-                let ja3 = ja3.clone();
-                move |msg: &mut Message| {
-                    dbg!("!!!!!!!!!");
-                    dbg!("!!!!!!!!!");
-                    dbg!(&msg);
-                    overwrite_client_hello_with_ja3(msg, &ja3, true, true)
-                }
-            }),
-            None => None,
-        };
         let mut tlsconf = rustls::ClientConfig::builder()
             .with_safe_defaults()
             .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
@@ -75,7 +67,7 @@ impl Client {
             {
                 // It is necessary to add it conf. Only adding it to allowed_unsolicited_extensions
                 // resulted in TLS client rejection when ALPN is negeotiated.
-                tlsconf.alpn_protocols = Vec::from(DEFAULT_ALPN_PROTOCOLS.map(|p| Vec::from(p)));
+                tlsconf.alpn_protocols = Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from));
             }
         }
         let mut tlsconn = rustls::ClientConnection::new_with(

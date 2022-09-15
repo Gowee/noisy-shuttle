@@ -27,7 +27,10 @@ use crate::utils::DurationExt;
 const PREFLIHGTER_CONNIDLE: usize = 120; // in secs
 const PREFLIHGTER_EMA_COEFF: f32 = 1.0 / 3.0;
 
-const JA3: &'static str = "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-17513-21,29-23-24,0";
+// quark browser
+// const JA3: &'static str = "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-17513-21,29-23-24,0";
+// chrome browser
+// const JA3: &str = "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-21,29-23-24,0";
 // "771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-34-51-43-13-45-28-21,29-23-24-25-256-257,0";
 
 #[tokio::main]
@@ -150,8 +153,19 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
         &opt.remote_addr,
         &opt.server_name,
         &opt.preflight.0,
-        &opt.preflight.1.unwrap_or(usize::MAX)
+        &opt.preflight.1.unwrap_or(usize::MAX),
     );
+    if let Some(ref ja3) = opt.ja3 {
+        info!("ja3: {}", ja3);
+        debug!(
+            "ja3 version: {:?}, ciphers: {:?}, extensions: {:?}, curves: {:?}, point_formats: {:?}",
+            ja3.version_to_typed(),
+            ja3.ciphers_as_typed().collect::<Vec<_>>(),
+            ja3.extensions_as_typed().collect::<Vec<_>>(),
+            ja3.curves_as_typed().collect::<Vec<_>>(),
+            ja3.point_formats_as_typed().collect::<Vec<_>>(),
+        );
+    }
     debug!(
         connidle = PREFLIHGTER_CONNIDLE,
         aht_ema_coeff = PREFLIHGTER_EMA_COEFF
@@ -159,7 +173,7 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     let client = Arc::new(Client {
         key: derive_psk(opt.key.as_bytes()),
         server_name: opt.server_name.as_str().try_into().unwrap(),
-        ja3: Some(JA3.parse().unwrap()),
+        ja3: opt.ja3.clone(),
     });
     let opt = Arc::new(opt);
 
