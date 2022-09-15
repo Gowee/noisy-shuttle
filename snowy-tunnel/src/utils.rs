@@ -20,6 +20,8 @@ use std::task::{Context, Poll};
 
 use crate::common::{MAXIMUM_CIPHERTEXT_LENGTH, TLS_RECORD_HEADER_LENGTH};
 
+const RFC7685_PADDING_TARGET: usize = 512;
+
 pub fn u16_from_be_slice(s: &[u8]) -> u16 {
     u16::from_be_bytes(<[u8; 2]>::try_from(s).unwrap())
 }
@@ -270,7 +272,7 @@ pub fn overwrite_client_hello_with_ja3(
     add_empty_if_extension_not_in_message: bool,
     drop_extensions_not_in_ja3: bool,
 ) -> Option<Vec<ExtensionType>> {
-    use ClientExtension::*;
+    use ExtensionType::*;
     let mut allowed_unsolicited_extensions = vec![ExtensionType::RenegotiationInfo];
     trace!("overwrite client hello of {:?} with ja3 {:?}", msg, ja3);
     msg.version = ja3.version_to_typed();
@@ -279,6 +281,7 @@ pub fn overwrite_client_hello_with_ja3(
         ref mut encoded,
     } = msg.payload
     {
+        let mut pad_per_rfc7685 = false;
         if let HandshakeMessagePayload {
             payload: HandshakePayload::ClientHello(ref mut chp),
             ..
@@ -287,6 +290,7 @@ pub fn overwrite_client_hello_with_ja3(
             chp.cipher_suites = ja3.ciphers_as_typed().collect();
             // chp.client_version = ja3.version_as_typed(); // version in extension are not handled
             for extension in chp.extensions.iter_mut() {
+                use ClientExtension::*;
                 match extension {
                     NamedGroups(groups) => {
                         *groups = ja3.curves_as_typed().collect();
@@ -310,27 +314,44 @@ pub fn overwrite_client_hello_with_ja3(
                 .collect();
             for &exttyp in ja3.extensions.iter() {
                 match extmap.remove(&exttyp) {
-                    Some(ext) => new_extensions.push(ext.to_owned()),
+                    Some(ext) => {
+                        let mut ext = ext.clone();
+                        if let ClientExtension::Unknown(UnknownExtension {
+                            typ: ExtensionType::Padding,
+                            ref mut payload,
+                        }) = ext
+                        {
+                            payload.0.clear();
+                            pad_per_rfc7685 = true;
+                        }
+                        new_extensions.push(ext)
+                    }
                     None => {
                         if !add_empty_if_extension_not_in_message {
                             break;
                         }
                         debug!(
                         "ja3 overwiting: missing extension {:?} in original chp, add an empty one",
-                        ExtensionType::from(exttyp)
-                    );
+                        ExtensionType::from(exttyp));
                         // Some extension expect vectored struct, we cannot just set empty.
-                        let extpld = match exttyp {
+                        let extpld = match ExtensionType::from(exttyp) {
                             // ALPN: http/1.1 + h2
-                            0x0010 => {
+                            ALProtocolNegotiation => {
                                 panic!("Expect ALPN present in message if it is listed in JA3")
                                 // allowed_unsolicited_extensions
                                 //     .push(ExtensionType::ALProtocolNegotiation);
                                 // Vec::from(hex!("000c08687474702f312e31026832"))
                             }
                             // Renegotiation Info: still empty, but an additional length field
-                            0xff01 => Vec::from(hex!("00")),
-
+                            RenegotiationInfo => Vec::from(hex!("00")),
+                            // ALPS: supported ALPN list: h2  (TODO: what is it?)
+                            ExtensionType::Unknown(0x4469) => Vec::from(hex!("0003026832")),
+                            // Padding as defined in RFC7685: pad the payload to at least 512 bytes
+                            // ref: https://datatracker.ietf.org/doc/html/rfc7685#section-4
+                            Padding => {
+                                pad_per_rfc7685 = true;
+                                vec![]
+                            }
                             _ => vec![],
                         };
                         let ext = ClientExtension::Unknown(UnknownExtension {
@@ -350,11 +371,42 @@ pub fn overwrite_client_hello_with_ja3(
                 }
             }
             chp.extensions = new_extensions;
-            // msg.payload = MessagePayload::handshake(HandshakeMessagePayload {
-            //     typ: HandshakeType::ClientHello,
-            //     payload: HandshakePayload::ClientHello(*chp),
-            // });
         }
+        dbg!(pad_per_rfc7685);
+        if pad_per_rfc7685 {
+            // previous steps ensure padding header is included already
+            let pldlen = parsed.get_encoding().len();
+            dbg!(pldlen);
+            let vacantlen = RFC7685_PADDING_TARGET.saturating_sub(pldlen);
+            dbg!(vacantlen);
+            if vacantlen != 0 {
+                // let padlen = if vacantlen > 4 {
+                //     // 4: payload header length
+                //     vacantlen - 4
+                // } else {
+                //     0
+                // };
+                // dbg!(padlen);
+                if let HandshakeMessagePayload {
+                    payload: HandshakePayload::ClientHello(ref mut chp),
+                    ..
+                } = parsed
+                {
+                    for extension in chp.extensions.iter_mut() {
+                        if let ClientExtension::Unknown(UnknownExtension {
+                            typ: ExtensionType::Padding,
+                            payload,
+                        }) = extension
+                        {
+                            payload.0.resize(vacantlen, 0);
+                            break;
+                        }
+                    }
+                }
+            }
+            // TODO: strip padding if final length > 512 + 4?
+        }
+        dbg!(parsed.get_encoding().len());
         // Payload are stored twice in struct: one typed and one bytes. Both (or at least the
         // latter) needs overwriting.
         *encoded = Payload::new(parsed.get_encoding());
