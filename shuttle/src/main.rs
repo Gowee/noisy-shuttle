@@ -15,7 +15,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use snowy_tunnel::{derive_psk, Client, Server, SnowyStream};
+use snowy_tunnel::{Client, Server, SnowyStream};
 
 mod opt;
 mod utils;
@@ -26,12 +26,6 @@ use crate::utils::DurationExt;
 // preflighter params
 const PREFLIHGTER_CONNIDLE: usize = 120; // in secs
 const PREFLIHGTER_EMA_COEFF: f32 = 1.0 / 3.0;
-
-// quark browser
-// const JA3: &'static str = "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-17513-21,29-23-24,0";
-// chrome browser
-// const JA3: &str = "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-21,29-23-24,0";
-// "771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-34-51-43-13-45-28-21,29-23-24-25-256-257,0";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -88,7 +82,7 @@ pub async fn handle_server_connection(
                     info!(tx, rx, "relay for {} closed", &client_addr);
                 }
                 Err(e) => {
-                    info!("relay for {} terminated with error {}:", &client_addr, e);
+                    info!("relay for {} terminated with error {}", &client_addr, e);
                 }
             }
             Ok(())
@@ -97,12 +91,12 @@ pub async fn handle_server_connection(
         Err(ReplayDetected {
             buf,
             mut io,
-            nounce,
+            nonce,
             first_from,
         }) => {
             warn!(
                 "replay detected from {}, nonce: {:x?}, first from: {}",
-                &client_addr, &nounce, &first_from
+                &client_addr, &nonce, &first_from
             );
             info!(
                 "camouflage relay: {} -> {} (pooh's agent)",
@@ -156,7 +150,7 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
         &opt.preflight.1.unwrap_or(usize::MAX),
     );
     if let Some(ref ja3) = opt.ja3 {
-        info!("ja3: {}", ja3);
+        info!("  ja3: {}", ja3);
         debug!(
             "ja3 version: {:?}, ciphers: {:?}, extensions: {:?}, curves: {:?}, point_formats: {:?}",
             ja3.version_to_typed(),
@@ -170,11 +164,11 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
         connidle = PREFLIHGTER_CONNIDLE,
         aht_ema_coeff = PREFLIHGTER_EMA_COEFF
     );
-    let client = Arc::new(Client {
-        key: derive_psk(opt.key.as_bytes()),
-        server_name: opt.server_name.as_str().try_into().unwrap(),
-        ja3: opt.ja3.clone(),
-    });
+    let client = Arc::new(Client::new(
+        opt.key.as_bytes(),
+        opt.server_name.as_str().try_into().unwrap(),
+        opt.ja3.clone(),
+    ));
     let opt = Arc::new(opt);
 
     let preflighter = match opt.preflight {

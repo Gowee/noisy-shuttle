@@ -1,5 +1,5 @@
 use ja3_rustls::Ja3;
-use rand::Rng;
+
 use rustls::internal::msgs::enums::ExtensionType;
 use rustls::internal::msgs::message::Message;
 use rustls::ClientConnection as RustlsClientConnection;
@@ -16,6 +16,7 @@ use std::io;
 use std::mem::{self, MaybeUninit};
 use std::sync::Arc;
 
+use crate::totp::Totp;
 use crate::utils::{overwrite_client_hello_with_ja3, parse_tls_plain_message, u16_from_be_slice};
 
 use crate::utils::{
@@ -24,8 +25,8 @@ use crate::utils::{
 };
 
 use super::common::{
-    SnowyStream, DEFAULT_ALPN_PROTOCOLS, MAXIMUM_CIPHERTEXT_LENGTH, NOISE_PARAMS, PSKLEN,
-    TLS_RECORD_HEADER_LENGTH,
+    derive_psk, SnowyStream, DEFAULT_ALPN_PROTOCOLS, MAXIMUM_CIPHERTEXT_LENGTH, NOISE_PARAMS,
+    PSKLEN, TLS_RECORD_HEADER_LENGTH,
 };
 
 #[derive(Debug, Clone)]
@@ -34,10 +35,21 @@ pub struct Client {
     // pub remote_addr: SocketAddr,
     pub server_name: ServerName,
     pub ja3: Option<Ja3>,
+    pub totp: Totp,
     // pub verify_tls: bool,
 }
 
 impl Client {
+    pub fn new(key: impl AsRef<[u8]>, server_name: ServerName, ja3: Option<Ja3>) -> Self {
+        let key = key.as_ref();
+        Client {
+            key: derive_psk(key),
+            server_name,
+            ja3,
+            totp: Totp::new(key, 60, 2),
+        }
+    }
+
     pub async fn connect(&self, mut stream: TcpStream) -> io::Result<SnowyStream> {
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
@@ -48,8 +60,15 @@ impl Client {
         let random = <[u8; 32]>::try_from(&psk_e[0..32]).unwrap();
         let mut session_id = [0u8; 32];
         session_id[..16].copy_from_slice(&psk_e[32..48]);
-        // pad to make it of a typical size
-        rand::thread_rng().fill(&mut session_id[16..]);
+        session_id[16..].copy_from_slice(&self.totp.sign_current::<16>(&psk_e[0..32]));
+        trace!(
+            "noise ping to {:?}, psk_e {:x?}, timesig: {:x?}",
+            &stream,
+            psk_e,
+            &session_id[16..]
+        );
+        // // pad to make it of a typical size
+        // rand::thread_rng().fill(&mut session_id[16..]);
 
         let mutch = self.ja3.as_ref().map(|ja3| {
             let ja3 = ja3.clone();
@@ -137,7 +156,7 @@ impl Client {
             })?;
         if pong.len() < 5 + 48 {
             warn!(
-                "Noise handshake {} <-> {} failed. Wrong key?",
+                "Noise handshake {} <-> {} failed. Wrong key or time out of sync?",
                 stream.local_addr().unwrap(),
                 stream.peer_addr().unwrap()
             );

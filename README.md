@@ -4,6 +4,15 @@ A tunnel built upon the brilliant idea of [shadow-tls](https://github.com/ihciah
 
 Inspired by https://github.com/ihciah/shadow-tls.
 
+## JA3 support
+The shuttle supports overwriting TLS ClientHello fingerprints specified in [JA3](https://github.com/salesforce/ja3) format.
+
+Examples JA3:
+
+- Some mobile browser: `771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-17513-21,29-23-24,0`
+- Google Chrome: `771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-21,29-23-24,0`
+
+
 ## TODO
 - [ ] connection multiplex or connection reuse
 - [ ] Embed `e, ee` into server-side CCS in TLS 1.2

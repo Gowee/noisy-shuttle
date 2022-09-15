@@ -1,3 +1,4 @@
+use blake2::{Blake2s256, Digest};
 use hex_literal::hex;
 use ja3_rustls::Ja3;
 use rustls::internal::msgs::base::Payload;
@@ -408,4 +409,15 @@ pub fn overwrite_client_hello_with_ja3(
         *encoded = Payload::new(parsed.get_encoding());
     }
     Some(allowed_unsolicited_extensions)
+}
+
+pub fn possibly_insecure_derive_key(context: impl AsRef<[u8]>, key: impl AsRef<[u8]>) -> [u8; 32] {
+    // Blake3 defines a key derivation function, but blake2 does not. We use blake2 to avoid
+    // introducing a extra dependency.
+    let mut hh = Blake2s256::new();
+    hh.update(context.as_ref());
+    let mut h = Blake2s256::new();
+    h.update(<[u8; 32]>::from(hh.finalize()));
+    h.update(key.as_ref());
+    h.finalize().into()
 }

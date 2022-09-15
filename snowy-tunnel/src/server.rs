@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use super::common::{SnowyStream, NOISE_PARAMS, PSKLEN};
 
 use crate::common::derive_psk;
+use crate::totp::Totp;
 use crate::utils::{
     get_client_tls_versions, get_server_tls_version, parse_tls_plain_message, read_tls_message,
     u16_from_be_slice, TlsMessageExt,
@@ -24,14 +25,21 @@ pub struct Server {
     pub key: [u8; PSKLEN],
     pub camouflage_addr: SocketAddr,
     pub replay_filter: Mutex<LruCache<[u8; 32], SocketAddr>>, // TODO: TOTP; prevent DoS attack
+    pub totp: Totp,
 }
 
 impl Server {
-    pub fn new(key: &[u8], camouflage_addr: SocketAddr, replay_filter_size: usize) -> Self {
+    pub fn new(
+        key: impl AsRef<[u8]>,
+        camouflage_addr: SocketAddr,
+        replay_filter_size: usize,
+    ) -> Self {
+        let key = key.as_ref();
         Server {
             key: derive_psk(key),
             camouflage_addr,
             replay_filter: Mutex::new(LruCache::new(replay_filter_size)),
+            totp: Totp::new(key, 60, 2),
         }
     }
 
@@ -46,6 +54,7 @@ impl Server {
 
         // Noise: -> psk, e
         let mut psk_e = [0u8; 48];
+        let mut timesig = [0u8; 16];
         match read_tls_message(&mut inbound, &mut buf)
             .await?
             .ok()
@@ -57,6 +66,7 @@ impl Server {
                 chp.random.write_slice(&mut psk_e[..32]); // client random
                 let s: (usize, [u8; 32]) = chp.session_id.into();
                 psk_e[32..].copy_from_slice(&s.1[..16]); // session id
+                timesig.copy_from_slice(&s.1[16..32]);
 
                 let client_tls1_3 = get_client_tls_versions(&chp)
                     .map(|vers| vers.iter().any(|&ver| ver == ProtocolVersion::TLSv1_3))
@@ -71,19 +81,27 @@ impl Server {
                 return Err(ClientHelloInvalid { buf, io: inbound });
             }
         }
+        trace!(
+            "noise ping from {:?}, psk_e {:x?}, timesig: {:x?}",
+            &inbound,
+            psk_e,
+            timesig
+        );
         let e = psk_e[..32].try_into().unwrap();
+        if !self.totp.verify_current(e, &timesig)
+            || responder.read_message(&psk_e, &mut []).is_err()
+        {
+            return Err(Unauthenticated { buf, io: inbound });
+        }
         {
             let mut rf = self.replay_filter.lock().unwrap();
             if let Some(&client_id) = rf.get(&e) {
                 return Err(ReplayDetected {
                     buf,
                     io: inbound,
-                    nounce: e,
+                    nonce: e,
                     first_from: client_id,
                 });
-            }
-            if responder.read_message(&psk_e, &mut []).is_err() {
-                return Err(Unauthenticated { buf, io: inbound });
             }
             rf.put(e, inbound.peer_addr().unwrap());
         }
@@ -161,7 +179,7 @@ impl Server {
         debug_assert_eq!(len, 48);
         trace!(pad_len, "e, ee in {:?}: {:x?}", inbound, &pong[5..5 + 48]);
         inbound.write_all(&pong[..5 + 48 + pad_len]).await?;
-        // but, is uniform random length of a message of first a few ones a characteristic per se?
+        // but, is uniform random length of initial messages a characteristic per se?
 
         let responder = responder
             .into_transport_mode()
@@ -179,7 +197,7 @@ pub enum AcceptError {
     ReplayDetected {
         buf: Vec<u8>,
         io: TcpStream,
-        nounce: [u8; 32],
+        nonce: [u8; 32],
         first_from: SocketAddr,
     },
     ClientHelloInvalid {

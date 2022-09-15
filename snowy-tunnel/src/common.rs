@@ -1,4 +1,3 @@
-use blake2::{Blake2s256, Digest};
 use lazy_static::lazy_static;
 use rustls::internal::msgs::deframer::MessageDeframer;
 use snow::params::NoiseParams;
@@ -14,7 +13,7 @@ use std::io::{self};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::utils::SyncReadAdapter;
+use crate::utils::{possibly_insecure_derive_key, SyncReadAdapter};
 
 lazy_static! {
     pub static ref NOISE_PARAMS: NoiseParams =
@@ -374,10 +373,6 @@ impl SnowyState {
     }
 }
 
-pub fn derive_psk(key: &[u8]) -> [u8; PSKLEN] {
-    // Blake3 defines a key derive function, but blake2 does not.
-    let mut h = Blake2s256::new();
-    h.update(CONTEXT);
-    h.update(key);
-    h.finalize().into()
+pub fn derive_psk(key: impl AsRef<[u8]>) -> [u8; PSKLEN] {
+    possibly_insecure_derive_key(CONTEXT, key)
 }
