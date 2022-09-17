@@ -5,10 +5,11 @@ use structopt::StructOpt;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
-use snowy_tunnel::{Client, FingerprintSpec};
+use snowy_tunnel::{Client, FingerprintSpec, Server};
 
 type Array<T> = Vec<T>;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, StructOpt)]
 #[structopt(name = "noisy-shuttle", about = "Shuttle for the Internet", global_settings(&[ColoredHelp, DeriveDisplayOrder]))]
 pub enum Opt {
@@ -78,6 +79,10 @@ pub struct SvrOpt {
     /// The key to encrypt all traffic
     #[structopt(name = "KEY")]
     pub key: String,
+
+    /// Size of the internal time-based LRU replay filter (time window: ±90secs)
+    #[structopt(long = "rfsize", default_value = "2048", name = "size")]
+    pub replay_filter_size: usize,
 }
 
 impl CltOpt {
@@ -96,6 +101,16 @@ impl CltOpt {
             self.key.as_bytes(),
             self.server_name.as_str().try_into().unwrap(),
             self.get_fingerprint_spec(),
+        )
+    }
+}
+
+impl SvrOpt {
+    pub fn build_server(&self) -> Server<String> {
+        Server::new(
+            self.key.as_bytes(),
+            self.camouflage_addr.clone(),
+            self.replay_filter_size,
         )
     }
 }

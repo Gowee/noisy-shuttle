@@ -1,6 +1,5 @@
 use blake2::{Blake2s256, Digest};
-
-use rustls::internal::msgs::codec::{Codec, Reader};
+use rustls::internal::msgs::codec::Reader;
 use rustls::internal::msgs::handshake::{
     ClientExtension, ClientHelloPayload, HandshakeMessagePayload, HandshakePayload,
     ServerExtension, ServerHelloPayload,
@@ -86,6 +85,7 @@ impl<'a, 'b, T: AsyncRead + Unpin> Read for SyncReadAdapter<'a, 'b, T> {
     }
 }
 
+// Copied from: https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L87
 /// Read a single TLS message into a Vec.
 pub async fn read_tls_message(
     mut r: impl AsyncRead + Unpin,
@@ -96,7 +96,6 @@ pub async fn read_tls_message(
     let typ = TlsContentType::from(header[0]);
     let ver = ProtocolVersion::from(u16_from_be_slice(&header[1..3]));
     let len = u16_from_be_slice(&header[3..5]) as usize;
-    // Copied from: https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L87
     // Reject undersize messages
     //  implemented per section 5.1 of RFC8446 (TLSv1.3)
     //              per section 6.2.1 of RFC5246 (TLSv1.2)

@@ -160,43 +160,12 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                         .iter()
                         .map(|extension| (extension.get_type().get_u16(), extension))
                         .collect();
-                    // let greasing = fp.ja3
-                    //     .extensions
-                    //     .iter()
-                    //     .any(|&exttyp| is_grease_u16_be(exttyp));
                     for exttyp in ja3
                         .extensions_regreasing_as_typed()
                         .map(|extension_type| extension_type.get_u16())
                     {
                         match extmap.remove(&exttyp) {
-                            Some(extension) => {
-                                // use ClientExtension::*;
-                                let mut extension = extension.clone();
-                                match &mut extension {
-                                    // // hardcode some GREASE insertions here since there is no cli option for them for now
-                                    // SupportedVersions(vers) => {
-                                    //     if !vers.iter().any(|ver| is_grease_u16_be(ver.get_u16())) {
-                                    //         vers.splice(
-                                    //             0..0,
-                                    //             [ProtocolVersion::from(grease_u16_be())],
-                                    //         );
-                                    //     }
-                                    // }
-                                    // KeyShare(ents) => {
-                                    //     if !ents
-                                    //         .iter()
-                                    //         .any(|ent| is_grease_u16_be(ent.group.get_u16()))
-                                    //     {
-                                    //         ents.splice(
-                                    //             0..0,
-                                    //             [KeyShareEntry::new(grease_u16_be().into(), &[])],
-                                    //         );
-                                    //     }
-                                    // }
-                                    _ => {}
-                                }
-                                new_extensions.push(extension)
-                            }
+                            Some(extension) => new_extensions.push(extension.clone()),
                             None => {
                                 if !add_empty_if_extension_not_in_message {
                                     continue;
@@ -217,10 +186,10 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                                     RenegotiationInfo => Vec::from(hex!("00")),
                                     // ALPS: supported ALPN list: h2  (TODO: what is it?)
                                     ExtensionType::Unknown(0x4469) => Vec::from(hex!("0003026832")),
-                                    // Padding => {
-                                    //     pad_per_rfc7685 = true;
-                                    //     vec![]
-                                    // }
+                                    Padding => {
+                                        pad_per_rfc7685 = true;
+                                        vec![]
+                                    }
                                     // Compress Certificate: Rustls does not support it.
                                     // Chrome use 02 00 02 (brotli).
                                     // By setting it non-empty, we risk at TLS negotiation error.
@@ -236,20 +205,17 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                             }
                         }
                     }
-                    if !extmap.is_empty() {
-                        trace!("ja3 overwriting: extension {:?} in original chp not present in ja3, prepend to end: {}", extmap, !drop_extensions_not_in_ja3);
-                        if !drop_extensions_not_in_ja3 {
-                            // there might be some extensions in CHP that are not present in ja3
-                            new_extensions
-                                .extend(extmap.into_iter().map(|(_typ, ext)| ext.to_owned()));
-                        }
+                    if !extmap.is_empty() && !drop_extensions_not_in_ja3 {
+                        // there might be some extensions in CHP that are not present in ja3
+                        trace!("ja3 overwriting: extension {:?} in original chp not present in ja3, appending to end: {}", extmap, !drop_extensions_not_in_ja3);
+                        new_extensions.extend(extmap.into_iter().map(|(_typ, ext)| ext.to_owned()));
                     }
                     chp.extensions = new_extensions;
                 }
                 None => {}
             }
 
-            // rewrite extenssion values
+            // rewrite extension values
             for extension in chp.extensions.iter_mut() {
                 use ClientExtension::*;
                 match extension {
@@ -293,7 +259,7 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                         dbg!(&fp.signature_algos);
                         try_assign!(
                             *algos,
-                            dbg!(fp.signature_algos.as_ref().map(|ref algos| algos
+                            dbg!(fp.signature_algos.as_ref().map(|algos| algos
                                 .iter()
                                 .map(|&algo| try_regrease_u16_be(algo).into())
                                 .collect()))
@@ -302,12 +268,6 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                     }
                     KeyShare(entries) => {
                         if let Some(fpents) = fp.key_share.as_ref() {
-                            // .map(|ent| {
-                            //     ent.iter()
-                            //         .map(|&ent| KeyShareEntry::new(ent.into(), &[]))
-                            //         .collect()
-                            //     }
-                            // )
                             let mut oldentmap: HashMap<_, _> = entries
                                 .iter()
                                 .map(|ent| (ent.group.get_u16(), ent))
@@ -330,17 +290,7 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                             }
                             // ignore remaining entries in oldentmap, if any
                             *entries = new_entries;
-                            //     }
                         }
-
-                        // try_assign!(
-                        //     *ents,
-                        //     fp.key_share.as_ref().map(|ref ent| {
-                        //         ent.iter()
-                        //             .map(|&ent| KeyShareEntry::new(ent.into(), &[]))
-                        //             .collect()
-                        //     })
-                        // )
                     }
                     Unknown(UnknownExtension {
                         typ: ExtensionType::Padding,

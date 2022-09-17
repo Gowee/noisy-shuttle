@@ -3,9 +3,10 @@ use rand::{thread_rng, Rng};
 use rustls::{HandshakeType, ProtocolVersion};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, ToSocketAddrs};
 use tracing::{debug, trace};
 
+use std::fmt::Debug;
 use std::io;
 use std::mem;
 use std::net::SocketAddr;
@@ -21,19 +22,15 @@ use crate::utils::{
 };
 
 #[derive(Debug)]
-pub struct Server {
+pub struct Server<A: ToSocketAddrs + Debug> {
     pub key: [u8; PSKLEN],
-    pub camouflage_addr: SocketAddr,
+    pub camouflage_addr: A,
     pub replay_filter: Mutex<LruCache<[u8; 32], SocketAddr>>, // TODO: TOTP; prevent DoS attack
     pub totp: Totp,
 }
 
-impl Server {
-    pub fn new(
-        key: impl AsRef<[u8]>,
-        camouflage_addr: SocketAddr,
-        replay_filter_size: usize,
-    ) -> Self {
+impl<A: ToSocketAddrs + Debug> Server<A> {
+    pub fn new(key: impl AsRef<[u8]>, camouflage_addr: A, replay_filter_size: usize) -> Self {
         let key = key.as_ref();
         Server {
             key: derive_psk(key),
@@ -51,6 +48,11 @@ impl Server {
             .build_responder()
             .expect("Valid NOISE params");
         let mut buf = Vec::new();
+
+        // Ref: https://tls12.xargs.org/
+        //      https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L88
+        //   CH: record header + handshake header + server version + server random + session id len +
+        //   session id + ..
 
         // Noise: -> psk, e
         let mut psk_e = [0u8; 48];
@@ -105,16 +107,13 @@ impl Server {
             }
             rf.put(e, inbound.peer_addr().unwrap());
         }
-        // Ref: https://tls12.xargs.org/
-        //      https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L88
-        //   record header + handshake header + server version + server random + session id len +
-        //   session id
-        let mut outbound = TcpStream::connect(self.camouflage_addr).await?;
+
+        let mut outbound = TcpStream::connect(&self.camouflage_addr).await?;
 
         // forward Client Hello in whole to camouflage server
         outbound.write_all(&buf).await?;
 
-        // read camouflage Server Hello
+        // read camouflage Server Hello back
         let shp = match read_tls_message(&mut outbound, &mut buf)
             .await?
             .ok()
@@ -150,13 +149,6 @@ impl Server {
                     outbound.peer_addr().unwrap()
                 );
                 relay_until_handshake_finished(&mut inbound, &mut outbound).await?;
-                // force flush TCP before sending e, ee in a dirty way; TODO: fix client
-                // this prevents client TLS implmentation from catching too much data in buffer
-                if !inbound.nodelay()? {
-                    inbound.set_nodelay(true)?;
-                    inbound.write_all(&[]).await?;
-                    inbound.set_nodelay(false)?;
-                }
                 debug!(
                     "{} <-> {} full handshake done",
                     inbound.peer_addr().unwrap(),
@@ -177,7 +169,7 @@ impl Server {
             .write_message(&[], &mut pong[5..])
             .expect("Valid NOISE state");
         debug_assert_eq!(len, 48);
-        trace!(pad_len, "e, ee in {:?}: {:x?}", inbound, &pong[5..5 + 48]);
+        trace!(pad_len, "e, ee from {:?}: {:x?}", inbound, &pong[5..5 + 48]);
         inbound.write_all(&pong[..5 + 48 + pad_len]).await?;
         // but, is uniform random length of initial messages a characteristic per se?
 

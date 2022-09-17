@@ -1,10 +1,8 @@
 use rustls::internal::msgs::enums::ExtensionType;
-
-use rustls::ClientConnection as RustlsClientConnection;
-use rustls::ContentType as TlsContentType;
-use rustls::HandshakeType;
-use rustls::ProtocolVersion;
-use rustls::ServerName;
+use rustls::{
+    ClientConnection as RustlsClientConnection, ContentType as TlsContentType, HandshakeType,
+    ProtocolVersion, ServerName,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::warn;
@@ -31,7 +29,6 @@ use super::common::{
 #[derive(Debug, Clone)]
 pub struct Client {
     pub key: [u8; PSKLEN],
-    // pub remote_addr: SocketAddr,
     pub server_name: ServerName,
     pub fingerprint_spec: Arc<FingerprintSpec>,
     pub totp: Totp,
@@ -79,8 +76,6 @@ impl Client {
             psk_e,
             &session_id[16..]
         );
-        // // pad to make it of a typical size
-        // rand::thread_rng().fill(&mut session_id[16..]);
 
         let mutch = self
             .fingerprint_spec
@@ -102,8 +97,8 @@ impl Client {
                     .fingerprint_spec
                     .alpn
                     .as_ref()
-                    .map(|v| v.clone())
-                    .unwrap_or(Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from))));
+                    .cloned()
+                    .unwrap_or_else(|| Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from))));
             }
         }
         let mut tlsconn = rustls::ClientConnection::new_with(
@@ -136,6 +131,7 @@ impl Client {
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "Not or invalid Server Hello")
             })?;
+
         // server negotiated TLS version
         match get_server_tls_version(&shp) {
             Some(ProtocolVersion::TLSv1_3) => {
@@ -165,12 +161,11 @@ impl Client {
 
         // Noise: <- e, ee
         let mut pong = Vec::with_capacity(5 + 48 + 24); // 0..24 random padding
-                                                        // TODO: timeout
         read_tls_message(&mut stream, &mut pong)
             .await?
             .map_err(|_e| {
                 io::Error::new(io::ErrorKind::InvalidData, "First data frame not noise")
-            })?;
+            })?; // TODO: timeout
         if pong.len() < 5 + 48 {
             warn!(
                 "Noise handshake {} <-> {} failed. Wrong key or time out of sync?",
@@ -182,7 +177,7 @@ impl Client {
                 "Noise handshake failed due to message length shorter than expected",
             ));
         }
-        let e_ee: [u8; 48] = pong[5..5 + 48].try_into().unwrap();
+        let e_ee: [u8; 48] = pong[5..5 + 48].try_into().unwrap(); // 32B pubkey + 16B AEAD cipher
         trace!(
             pad_len = pong.len() - (5 + 48),
             "e, ee in {:?}: {:x?}",
