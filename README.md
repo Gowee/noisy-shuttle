@@ -4,13 +4,25 @@ A tunnel built upon the brilliant idea of [shadow-tls](https://github.com/ihciah
 
 Inspired by https://github.com/ihciah/shadow-tls.
 
-## JA3 support
-The shuttle supports overwriting TLS ClientHello fingerprints specified in [JA3](https://github.com/salesforce/ja3) format.
+## ✨ Features
 
-Examples JA3:
+- Eavesdropper-verifiable authentic TLS handshakes with any website, requiring no certificates
+
+- PSK-based covert authentication piggybacked by TLS client random and session id field
+
+- Almost fully customizable TLS client fingerprint
+
+- AEAD encrypted traffic with forward secrecy via ECDHE
+
+Example fingerprints:
+
+https://tlsfingerprint.io/id/e47eae8f8c4887b6: `--tls-ja3 769,2570-4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,2570-0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-2570-21,2570-29-23-24,0 -p 1 --tls-alpn h2,http/1.1 --tls-sigalgos 1027,2052,1025,1283,2053,1281,2054,1537 --tls-versions 2570,772,771 --tls-keyshare 2570,29`
+
 
 - Some mobile browser: `771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-17513-21,29-23-24,0`
 - Google Chrome: `771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-21,29-23-24,0`
+
+
 
 
 ## TODO

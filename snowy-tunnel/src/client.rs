@@ -1,7 +1,5 @@
-use ja3_rustls::Ja3;
-
 use rustls::internal::msgs::enums::ExtensionType;
-use rustls::internal::msgs::message::Message;
+
 use rustls::ClientConnection as RustlsClientConnection;
 use rustls::ContentType as TlsContentType;
 use rustls::HandshakeType;
@@ -17,7 +15,8 @@ use std::mem::{self, MaybeUninit};
 use std::sync::Arc;
 
 use crate::totp::Totp;
-use crate::utils::{overwrite_client_hello_with_ja3, parse_tls_plain_message, u16_from_be_slice};
+use crate::utils::{parse_tls_plain_message, u16_from_be_slice};
+use crate::FingerprintSpec;
 
 use crate::utils::{
     get_server_tls_version, read_tls_message, HandshakeStateExt, NoCertificateVerification,
@@ -34,18 +33,31 @@ pub struct Client {
     pub key: [u8; PSKLEN],
     // pub remote_addr: SocketAddr,
     pub server_name: ServerName,
-    pub ja3: Option<Ja3>,
+    pub fingerprint_spec: Arc<FingerprintSpec>,
     pub totp: Totp,
     // pub verify_tls: bool,
 }
 
 impl Client {
-    pub fn new(key: impl AsRef<[u8]>, server_name: ServerName, ja3: Option<Ja3>) -> Self {
+    pub fn new(key: impl AsRef<[u8]>, server_name: ServerName) -> Self {
         let key = key.as_ref();
         Client {
             key: derive_psk(key),
             server_name,
-            ja3,
+            fingerprint_spec: Default::default(),
+            totp: Totp::new(key, 60, 2),
+        }
+    }
+    pub fn new_with_fingerprint(
+        key: impl AsRef<[u8]>,
+        server_name: ServerName,
+        fingerprint_spec: FingerprintSpec,
+    ) -> Self {
+        let key = key.as_ref();
+        Client {
+            key: derive_psk(key),
+            server_name,
+            fingerprint_spec: Arc::new(fingerprint_spec),
             totp: Totp::new(key, 60, 2),
         }
     }
@@ -70,23 +82,28 @@ impl Client {
         // // pad to make it of a typical size
         // rand::thread_rng().fill(&mut session_id[16..]);
 
-        let mutch = self.ja3.as_ref().map(|ja3| {
-            let ja3 = ja3.clone();
-            move |msg: &mut Message| overwrite_client_hello_with_ja3(msg, &ja3, true, true)
-        });
+        let mutch = self
+            .fingerprint_spec
+            .get_client_hello_overwriter(true, true);
         // TODO: option for verifying camouflage cert
         let mut tlsconf = rustls::ClientConfig::builder()
             .with_safe_defaults()
             .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
             .with_no_client_auth();
-        if let Some(ref ja3) = self.ja3 {
+        if let Some(ref ja3) = self.fingerprint_spec.ja3 {
+            // if alpn is not set in ja3, fingerprint_spec.alpn is ignored
             if ja3
                 .extensions_as_typed()
                 .any(|ext| ext == ExtensionType::ALProtocolNegotiation)
             {
-                // It is necessary to add it conf. Only adding it to allowed_unsolicited_extensions
+                // It is necessary to add it to conf. Only adding it to allowed_unsolicited_extensions
                 // resulted in TLS client rejection when ALPN is negeotiated.
-                tlsconf.alpn_protocols = Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from));
+                tlsconf.alpn_protocols = dbg!(self
+                    .fingerprint_spec
+                    .alpn
+                    .as_ref()
+                    .map(|v| v.clone())
+                    .unwrap_or(Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from))));
             }
         }
         let mut tlsconn = rustls::ClientConnection::new_with(

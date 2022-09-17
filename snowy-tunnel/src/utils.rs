@@ -1,27 +1,20 @@
 use blake2::{Blake2s256, Digest};
-use hex_literal::hex;
-use ja3_rustls::Ja3;
-use rustls::internal::msgs::base::Payload;
+
 use rustls::internal::msgs::codec::{Codec, Reader};
-use rustls::internal::msgs::enums::ExtensionType;
 use rustls::internal::msgs::handshake::{
     ClientExtension, ClientHelloPayload, HandshakeMessagePayload, HandshakePayload,
-    ServerExtension, ServerHelloPayload, UnknownExtension,
+    ServerExtension, ServerHelloPayload,
 };
 use rustls::internal::msgs::message::{Message, MessageError, MessagePayload, OpaqueMessage};
 use rustls::{ContentType as TlsContentType, Error as RustlsError, ProtocolVersion};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
-use tracing::{debug, trace};
 
-use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io::{self, Read};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use crate::common::{MAXIMUM_CIPHERTEXT_LENGTH, TLS_RECORD_HEADER_LENGTH};
-
-const RFC7685_PADDING_TARGET: usize = 512;
 
 pub fn u16_from_be_slice(s: &[u8]) -> u16 {
     u16::from_be_bytes(<[u8; 2]>::try_from(s).unwrap())
@@ -255,163 +248,10 @@ pub fn get_client_tls_versions(shp: &ClientHelloPayload) -> Option<&Vec<Protocol
 //     }
 // }
 
-/// Apply a JA3 fingerprint to a ClientHello [`Message`].
-///
-/// Cipher suites, curvres, and EC point formats are simply overwritten with the those specified by
-/// a JA3. For TLS extensions, the function manages to match the sort order, **optionally** add
-/// empty or hardcoded dummy records for those not in message yet but listed in JA3, and
-/// **optionally** drop existing ones from client hello payload if they are not present in JA3.
-///
-/// It returns a list of allowed unsolicited server extensions matched with the updated message.
-///
-/// # Note
-/// It is caller's responsibility to ensure that the message constitutes a valid ClientHello. Otherwise,
-/// only the protocol version in the message header is overwritten.
-pub fn overwrite_client_hello_with_ja3(
-    msg: &mut Message,
-    ja3: &Ja3,
-    add_empty_if_extension_not_in_message: bool,
-    drop_extensions_not_in_ja3: bool,
-) -> Option<Vec<ExtensionType>> {
-    use ExtensionType::*;
-    #[allow(unused_mut)]
-    let mut allowed_unsolicited_extensions = vec![ExtensionType::RenegotiationInfo];
-    trace!("overwrite client hello of {:?} with ja3 {:?}", msg, ja3);
-    msg.version = ja3.version_to_typed();
-    if let MessagePayload::Handshake {
-        ref mut parsed,
-        ref mut encoded,
-    } = msg.payload
-    {
-        let mut pad_per_rfc7685 = false;
-        if let HandshakeMessagePayload {
-            payload: HandshakePayload::ClientHello(ref mut chp),
-            ..
-        } = parsed
-        {
-            chp.cipher_suites = ja3.ciphers_as_typed().collect();
-            // chp.client_version = ja3.version_as_typed(); // version in extension are not handled
-            for extension in chp.extensions.iter_mut() {
-                use ClientExtension::*;
-                match extension {
-                    NamedGroups(groups) => {
-                        *groups = ja3.curves_as_typed().collect();
-                    }
-                    ECPointFormats(formats) => {
-                        *formats = ja3.point_formats_as_typed().collect();
-                    }
-                    _ => {}
-                }
-            }
-            // try to match extension order
-            let mut new_extensions = Vec::with_capacity(if drop_extensions_not_in_ja3 {
-                ja3.extensions.len()
-            } else {
-                chp.extensions.len()
-            });
-            let mut extmap: HashMap<u16, &ClientExtension> = chp
-                .extensions
-                .iter()
-                .map(|extension| (extension.get_type().get_u16(), extension))
-                .collect();
-            for &exttyp in ja3.extensions.iter() {
-                match extmap.remove(&exttyp) {
-                    Some(ext) => {
-                        let mut ext = ext.clone();
-                        if let ClientExtension::Unknown(UnknownExtension {
-                            typ: ExtensionType::Padding,
-                            ref mut payload,
-                        }) = ext
-                        {
-                            payload.0.clear();
-                            pad_per_rfc7685 = true;
-                        }
-                        new_extensions.push(ext)
-                    }
-                    None => {
-                        if !add_empty_if_extension_not_in_message {
-                            break;
-                        }
-                        debug!(
-                        "ja3 overwiting: missing extension {:?} in original chp, add an empty one",
-                        ExtensionType::from(exttyp));
-                        // Some extension expect vectored struct, we cannot just set empty.
-                        let extpld = match ExtensionType::from(exttyp) {
-                            // ALPN: http/1.1 + h2
-                            ALProtocolNegotiation => {
-                                panic!("Expect ALPN present in message if it is listed in JA3")
-                                // allowed_unsolicited_extensions
-                                //     .push(ExtensionType::ALProtocolNegotiation);
-                                // Vec::from(hex!("000c08687474702f312e31026832"))
-                            }
-                            // Renegotiation Info: still empty, but an additional length field
-                            RenegotiationInfo => Vec::from(hex!("00")),
-                            // ALPS: supported ALPN list: h2  (TODO: what is it?)
-                            ExtensionType::Unknown(0x4469) => Vec::from(hex!("0003026832")),
-                            // Padding as defined in RFC7685: pad the payload to at least 512 bytes
-                            // ref: https://datatracker.ietf.org/doc/html/rfc7685#section-4
-                            Padding => {
-                                pad_per_rfc7685 = true;
-                                vec![]
-                            }
-                            // Compress Certificate: Rustls does not support it.
-                            // Chrome use 02 00 02 (brotli).
-                            // By setting it non-empty, we risk at TLS negotiation error.
-                            ExtensionType::Unknown(0x001b) => Vec::from(hex!("020002")),
-                            _ => vec![],
-                        };
-                        let ext = ClientExtension::Unknown(UnknownExtension {
-                            typ: ExtensionType::from(exttyp),
-                            payload: Payload(extpld),
-                        });
-                        new_extensions.push(ext);
-                        // Codec works fine with UnknownExtension
-                    }
-                }
-            }
-            if !extmap.is_empty() {
-                debug!("ja3 overwriting: extension {:?} in original chp not present in ja3, prepend to end: {}", extmap, !drop_extensions_not_in_ja3);
-                if !drop_extensions_not_in_ja3 {
-                    // there might be some extensions in CHP that are not present in ja3
-                    new_extensions.extend(extmap.into_iter().map(|(_typ, ext)| ext.to_owned()));
-                }
-            }
-            chp.extensions = new_extensions;
-        }
-        if pad_per_rfc7685 {
-            // previous steps ensure padding header is included already
-            let pldlen = parsed.get_encoding().len();
-            let padlen = RFC7685_PADDING_TARGET.saturating_sub(pldlen);
-            debug!(padlen, "ja3 overwiting: apply rfc7685 padding");
-            if padlen != 0 {
-                if let HandshakeMessagePayload {
-                    payload: HandshakePayload::ClientHello(ref mut chp),
-                    ..
-                } = parsed
-                {
-                    for extension in chp.extensions.iter_mut() {
-                        if let ClientExtension::Unknown(UnknownExtension {
-                            typ: ExtensionType::Padding,
-                            payload,
-                        }) = extension
-                        {
-                            payload.0.resize(padlen, 0);
-                            break;
-                        }
-                    }
-                }
-            }
-            // TODO: strip padding if final length >= 512 + 4?
-        }
-        // TODO: add GREASE
-        // Payload are stored twice in struct: one typed and one bytes. Both (or at least the
-        // latter) needs overwriting.
-        *encoded = Payload::new(parsed.get_encoding());
-    }
-    Some(allowed_unsolicited_extensions)
-}
-
-pub fn possibly_insecure_derive_key(context: impl AsRef<[u8]>, key: impl AsRef<[u8]>) -> [u8; 32] {
+pub fn possibly_insecure_hash_with_key(
+    context: impl AsRef<[u8]>,
+    key: impl AsRef<[u8]>,
+) -> [u8; 32] {
     // Blake3 defines a key derivation function, but blake2 does not. We use blake2 to avoid
     // introducing a extra dependency.
     let mut hh = Blake2s256::new();
@@ -420,4 +260,13 @@ pub fn possibly_insecure_derive_key(context: impl AsRef<[u8]>, key: impl AsRef<[
     h.update(<[u8; 32]>::from(hh.finalize()));
     h.update(key.as_ref());
     h.finalize().into()
+}
+
+#[macro_export]
+macro_rules! try_assign {
+    ($left: expr, $right: expr) => {
+        if let Some(v) = $right {
+            $left = dbg!(v);
+        }
+    };
 }

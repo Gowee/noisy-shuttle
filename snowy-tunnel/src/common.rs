@@ -13,7 +13,7 @@ use std::io::{self};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::utils::{possibly_insecure_derive_key, SyncReadAdapter};
+use crate::utils::{possibly_insecure_hash_with_key, SyncReadAdapter};
 
 lazy_static! {
     pub static ref NOISE_PARAMS: NoiseParams =
@@ -374,5 +374,5 @@ impl SnowyState {
 }
 
 pub fn derive_psk(key: impl AsRef<[u8]>) -> [u8; PSKLEN] {
-    possibly_insecure_derive_key(CONTEXT, key)
+    possibly_insecure_hash_with_key(CONTEXT, key)
 }
