@@ -1,7 +1,7 @@
 [workspace]
 
 members = [
-    "snowy-tunnel",
+    "tunnel",
     "shuttle"
 ]
 

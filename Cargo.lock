@@ -455,6 +455,7 @@ dependencies = [
 [[package]]
 name = "ja3-rustls"
 version = "0.0.5"
+source = "git+https://github.com/gowee/ja3-rustls.git#87edeb59075c662557e7712f16738cacb40ec5ca"
 dependencies = [
  "rand",
  "rustls",
