@@ -63,9 +63,9 @@ impl Client {
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
             .build_initiator()
-            .expect("Valid noise params");
+            .expect("Noise params valid");
         // Noise: -> psk, e
-        let psk_e = initiator.writen::<48>().expect("Valid noise state");
+        let psk_e = initiator.writen::<48>().expect("Noise state valid");
         let random = <[u8; 32]>::try_from(&psk_e[0..32]).unwrap();
         let mut session_id = [0u8; 32];
         session_id[..16].copy_from_slice(&psk_e[32..48]);
@@ -77,7 +77,7 @@ impl Client {
             &session_id[16..]
         );
 
-        let mutch = self
+        let chwriter = self
             .fingerprint_spec
             .get_client_hello_overwriter(true, true);
         // TODO: option for verifying camouflage cert
@@ -86,19 +86,19 @@ impl Client {
             .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
             .with_no_client_auth();
         if let Some(ref ja3) = self.fingerprint_spec.ja3 {
-            // if alpn is not set in ja3, fingerprint_spec.alpn is ignored
+            // fingerprint_spec.alpn is effective iff alpn is set in ja3,
             if ja3
                 .extensions_as_typed()
                 .any(|ext| ext == ExtensionType::ALProtocolNegotiation)
             {
                 // It is necessary to add it to conf. Only adding it to allowed_unsolicited_extensions
                 // resulted in TLS client rejection when ALPN is negeotiated.
-                tlsconf.alpn_protocols = dbg!(self
+                tlsconf.alpn_protocols = self
                     .fingerprint_spec
                     .alpn
                     .as_ref()
                     .cloned()
-                    .unwrap_or_else(|| Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from))));
+                    .unwrap_or_else(|| Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from)));
             }
         }
         let mut tlsconn = rustls::ClientConnection::new_with(
@@ -106,9 +106,9 @@ impl Client {
             self.server_name.clone(),
             random.into(),
             session_id.as_slice().into(),
-            mutch,
+            chwriter,
         )
-        .expect("Valid TLS config");
+        .expect("TLS config valid");
 
         let mut buf: Vec<MaybeUninit<u8>> =
             Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
@@ -255,9 +255,9 @@ async fn tls12_handshake(
                 })?;
                 match TlsContentType::from(buf[0]) {
                     TlsContentType::ChangeCipherSpec => {
-                        // after server ChangeCipherSpec, the final Handshake Finished message is encrypted
-                        // it can be used to carry other data
                         seen_ccs = true;
+                        // after server ChangeCipherSpec, the final Handshake Finished message is encrypted
+                        // so it can be used to carry other data
                         if stop_after_server_ccs {
                             break;
                         }

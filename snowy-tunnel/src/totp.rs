@@ -90,17 +90,6 @@ fn system_now() -> u64 {
         .as_secs()
 }
 
-// pub fn derive_psk(key: &[u8]) -> [u8; PSKLEN] {
-//     // Blake3 defines a key derive function, but blake2 does not.
-//     let mut h = Blake2s256::new();
-//     h.update(CONTEXT);
-//     h.update(key);
-//     h.finalize().into()
-// }
-
-// // trait TOTPExt {
-// }
-
 #[cfg(test)]
 mod tests {
     use super::Totp;

@@ -32,6 +32,6 @@ https://tlsfingerprint.io/id/e47eae8f8c4887b6: `--tls-ja3 769,2570-4865-4866-486
 - [ ] Elligator for public key
 - [ ] Utilize Keyshare?
 - [x] Specify TLS fingerprint (JA3)
-- [ ] TLS GREASE
+- [x] TLS GREASE
 - [ ] Configurable actions for unauthenticated client
 - [ ] Random packet padding and even packets

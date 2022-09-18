@@ -78,14 +78,6 @@ impl FingerprintSpec {
             )
         })
     }
-
-    // pub fn try_set_version(&self, ver: &mut ProtocolVersion) {
-    //     *ver = self.ja3.map(|ja3| ja3.version_to_typed()).unwrap_or(*ver)
-    // }
-
-    // pub fn try_set_ciphers(&self, ver: &mut ProtocolVersion) {
-    //     *ver = self.ja3.map(|ja3| ja3.version_to_typed()).unwrap_or(*ver)
-    // }
 }
 
 // impl From<Ja3> for FingerprintSpec {
@@ -126,11 +118,10 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
         msg,
         fp
     );
-    msg.version = fp
-        .ja3
-        .as_ref()
-        .map(|ja3| ja3.version_to_typed())
-        .unwrap_or(msg.version);
+    try_assign!(
+        msg.version,
+        fp.ja3.as_ref().map(|ja3| ja3.version_to_typed())
+    );
     if let MessagePayload::Handshake {
         ref mut parsed,
         ref mut encoded,
@@ -146,7 +137,6 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                 chp.cipher_suites,
                 fp.ja3.as_ref().map(|ja3| ja3.ciphers_as_typed().collect())
             );
-            // chp.client_version = ja3.version_as_typed(); // version in extension are not handled
             match &fp.ja3 {
                 Some(ja3) => {
                     // try to match extension order
@@ -155,7 +145,7 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                     } else {
                         chp.extensions.len()
                     });
-                    let mut extmap: HashMap<u16, &ClientExtension> = chp
+                    let mut oldextmap: HashMap<u16, &ClientExtension> = chp
                         .extensions
                         .iter()
                         .map(|extension| (extension.get_type().get_u16(), extension))
@@ -164,7 +154,7 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                         .extensions_regreasing_as_typed()
                         .map(|extension_type| extension_type.get_u16())
                     {
-                        match extmap.remove(&exttyp) {
+                        match oldextmap.remove(&exttyp) {
                             Some(extension) => new_extensions.push(extension.clone()),
                             None => {
                                 if !add_empty_if_extension_not_in_message {
@@ -205,10 +195,11 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                             }
                         }
                     }
-                    if !extmap.is_empty() && !drop_extensions_not_in_ja3 {
+                    if !oldextmap.is_empty() && !drop_extensions_not_in_ja3 {
                         // there might be some extensions in CHP that are not present in ja3
-                        trace!("ja3 overwriting: extension {:?} in original chp not present in ja3, appending to end: {}", extmap, !drop_extensions_not_in_ja3);
-                        new_extensions.extend(extmap.into_iter().map(|(_typ, ext)| ext.to_owned()));
+                        trace!("ja3 overwriting: extension {:?} in original chp not present in ja3, appending to end: {}", oldextmap, !drop_extensions_not_in_ja3);
+                        new_extensions
+                            .extend(oldextmap.into_iter().map(|(_typ, ext)| ext.to_owned()));
                     }
                     chp.extensions = new_extensions;
                 }
@@ -256,15 +247,13 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                         )
                     }
                     SignatureAlgorithms(algos) => {
-                        dbg!(&fp.signature_algos);
                         try_assign!(
                             *algos,
-                            dbg!(fp.signature_algos.as_ref().map(|algos| algos
+                            fp.signature_algos.as_ref().map(|algos| algos
                                 .iter()
                                 .map(|&algo| try_regrease_u16_be(algo).into())
-                                .collect()))
+                                .collect())
                         );
-                        dbg!(algos);
                     }
                     KeyShare(entries) => {
                         if let Some(fpents) = fp.key_share.as_ref() {
@@ -272,14 +261,13 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                                 .iter()
                                 .map(|ent| (ent.group.get_u16(), ent))
                                 .collect();
-                            //  {
                             let mut new_entries = vec![];
                             for &ent in fpents {
                                 match oldentmap.remove(&ent) {
                                     Some(entry) => new_entries.push(entry.clone()),
                                     None => {
                                         if !is_grease_u16_be(ent) {
-                                            warn!("TLS Key Share of curve {} is not present in original ClientHello. A empty payload is used, which makes traffic look distinctive. It should not be used.", ent);
+                                            warn!("TLS Key Share of curve {} is not present in original ClientHello. A empty payload is used, which makes traffic look distinctive.", ent);
                                         }
                                         new_entries.push(KeyShareEntry::new(
                                             try_regrease_u16_be(ent).into(),
@@ -304,7 +292,7 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
             }
         }
         if pad_per_rfc7685 {
-            // previous steps ensure padding header is included already
+            // previous steps ensure padding extension is included already
             // Padding as defined in RFC7685: pad the payload to at least 512 bytes
             // ref: https://datatracker.ietf.org/doc/html/rfc7685#section-4
             let pldlen = parsed.get_encoding().len();
@@ -328,12 +316,14 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                     }
                 }
             }
-            debug!("ja3 overwriting: len of client hello msg >= 512 + 4, while padding is still applied ");
             // TODO: strip padding if final length >= 512 + 4?
         }
         // Payload are stored twice in struct: one typed and one bytes. Both (or at least the
         // latter) needs overwriting.
         *encoded = Payload::new(parsed.get_encoding());
+        if pad_per_rfc7685 && encoded.0.len() >= 512 + 4 {
+            debug!("ja3 overwriting: len of client hello msg >= 512 + 4, while padding is still applied ");
+        }
     }
     Some(allowed_unsolicited_extensions)
 }

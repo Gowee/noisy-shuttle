@@ -92,7 +92,6 @@ impl Preflighter {
         let t2 = Instant::now();
         match h.await.unwrap() {
             Ok(s) => {
-                // (s, tt)
                 let aht = *self.average_handshake_time.lock().unwrap(); // lock dropped immediately
                 let chd = {
                     let mut chd = self.cumulative_handshake_delay.lock().unwrap();

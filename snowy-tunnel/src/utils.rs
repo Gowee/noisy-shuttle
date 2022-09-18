@@ -237,27 +237,14 @@ pub fn get_client_tls_versions(shp: &ClientHelloPayload) -> Option<&Vec<Protocol
 //     }
 // }
 
-// trait ExponentialMovingAverage {
-//     fn ema(&self, coeff: f64) -> Duration;
-// }
-
-// impl ExponentialMovingAverage for Duration {
-//     fn ema(&self, coeff: f64) -> Duration {
-//         self.as_nanos() * coeff
-//     }
-// }
-
-pub fn possibly_insecure_hash_with_key(
-    context: impl AsRef<[u8]>,
-    key: impl AsRef<[u8]>,
-) -> [u8; 32] {
+pub fn possibly_insecure_hash_with_key(key: impl AsRef<[u8]>, msg: impl AsRef<[u8]>) -> [u8; 32] {
     // Blake3 defines a key derivation function, but blake2 does not. We use blake2 to avoid
     // introducing a extra dependency.
     let mut hh = Blake2s256::new();
-    hh.update(context.as_ref());
+    hh.update(key.as_ref());
     let mut h = Blake2s256::new();
     h.update(<[u8; 32]>::from(hh.finalize()));
-    h.update(key.as_ref());
+    h.update(msg.as_ref());
     h.finalize().into()
 }
 
@@ -265,7 +252,7 @@ pub fn possibly_insecure_hash_with_key(
 macro_rules! try_assign {
     ($left: expr, $right: expr) => {
         if let Some(v) = $right {
-            $left = dbg!(v);
+            $left = v;
         }
     };
 }

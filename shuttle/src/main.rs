@@ -184,7 +184,7 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
         let preflighter = preflighter.clone();
         // TODO: handle error
         tokio::spawn(async move {
-            dbg!(handle_client_connection(client, preflighter, inbound, client_addr, opt,).await)
+            handle_client_connection(client, preflighter, inbound, client_addr, opt).await
         });
     }
     Ok(())
