@@ -1,7 +1,7 @@
 use lru::LruCache;
 use rand::{thread_rng, Rng};
 use rustls::{HandshakeType, ProtocolVersion};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tracing::{debug, trace};
@@ -22,25 +22,28 @@ use crate::utils::{
 };
 
 #[derive(Debug)]
-pub struct Server<A: ToSocketAddrs + Debug> {
+pub struct Server<IO: AsyncRead + AsyncWrite + Unpin, C: Fn() -> io::Result<IO>> {
     pub key: [u8; PSKLEN],
-    pub camouflage_addr: A,
+    pub camouflage_connector: C,
     pub replay_filter: Mutex<LruCache<[u8; 32], SocketAddr>>, // TODO: TOTP; prevent DoS attack
     pub totp: Totp,
 }
 
-impl<A: ToSocketAddrs + Debug> Server<A> {
-    pub fn new(key: impl AsRef<[u8]>, camouflage_addr: A, replay_filter_size: usize) -> Self {
+impl<IO: AsyncRead + AsyncWrite + Unpin, C: Fn() -> io::Result<IO>> Server<IO, C> {
+    pub fn new_with_camouflage_addr<A: ToSocketAddrs>(key: impl AsRef<[u8]>, camouflage_addr: A, replay_filter_size: usize) -> Self {
         let key = key.as_ref();
         Server {
             key: derive_psk(key),
-            camouflage_addr,
+            || { },
             replay_filter: Mutex::new(LruCache::new(replay_filter_size)),
             totp: Totp::new(key, 60, 2),
         }
     }
 
-    pub async fn accept(&self, mut inbound: TcpStream) -> Result<SnowyStream, AcceptError> {
+    pub async fn accept<IO: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        mut inbound: IO,
+    ) -> Result<SnowyStream<IO>, AcceptError> {
         use AcceptError::*;
 
         let mut responder = snow::Builder::new(NOISE_PARAMS.clone())
@@ -73,19 +76,14 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
                 let client_tls1_3 = get_client_tls_versions(&chp)
                     .map(|vers| vers.iter().any(|&ver| ver == ProtocolVersion::TLSv1_3))
                     .unwrap_or(false);
-                trace!(
-                    "client {} supports TLS 1.3: {}",
-                    inbound.peer_addr().unwrap(),
-                    client_tls1_3
-                );
+                trace!("client supports TLS 1.3: {}", client_tls1_3);
             }
             None => {
                 return Err(ClientHelloInvalid { buf, io: inbound });
             }
         }
         trace!(
-            "noise ping from {:?}, psk_e {:x?}, timesig: {:x?}",
-            &inbound,
+            "noise ping received, psk_e: {:x?}, timesig: {:x?}",
             psk_e,
             timesig
         );
@@ -135,25 +133,13 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
         match get_server_tls_version(&shp) {
             Some(ProtocolVersion::TLSv1_3) => {
                 // TLS 1.3: handshake done
-                debug!(
-                    "{} <-> {} negotiated TLS version: 1.3",
-                    inbound.peer_addr().unwrap(),
-                    outbound.peer_addr().unwrap()
-                );
+                debug!("negotiated TLS version: 1.3",);
             }
             _ => {
                 // TLS 1.2: continue handshake
-                debug!(
-                    "{} <-> {} negotiated TLS version: 1.2 or other",
-                    inbound.peer_addr().unwrap(),
-                    outbound.peer_addr().unwrap()
-                );
+                debug!("negotiated TLS version: 1.2 or other",);
                 relay_until_handshake_finished(&mut inbound, &mut outbound).await?;
-                debug!(
-                    "{} <-> {} full handshake done",
-                    inbound.peer_addr().unwrap(),
-                    outbound.peer_addr().unwrap()
-                );
+                debug!("full handshake done",);
             }
         }
 
@@ -167,9 +153,13 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
         pong[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30 + pad_len as u8]);
         let len = responder
             .write_message(&[], &mut pong[5..])
-            .expect("Valid NOISE state");
+            .expect("Noise state valid");
         debug_assert_eq!(len, 48);
-        trace!(pad_len, "e, ee from {:?}: {:x?}", inbound, &pong[5..5 + 48]);
+        trace!(
+            pad_len,
+            "Noise handshake sending e, ee : {:x?}",
+            &pong[5..5 + 48]
+        );
         inbound.write_all(&pong[..5 + 48 + pad_len]).await?;
         // but, is uniform random length of initial messages a characteristic per se?
 
@@ -209,9 +199,9 @@ impl From<io::Error> for AcceptError {
     }
 }
 
-async fn copy_until_handshake_finished<'a>(
-    mut read_half: ReadHalf<'a>,
-    mut write_half: WriteHalf<'a>,
+async fn copy_until_handshake_finished<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    mut read_half: R,
+    mut write_half: W,
 ) -> io::Result<()> {
     //  Adapted from: https://github.com/ihciah/shadow-tls/blob/2bbdc26cff1120ba9c8eded39ad743c4c4f687c4/src/protocol.rs#L138
     const HANDSHAKE: u8 = 0x16;
@@ -257,12 +247,15 @@ async fn copy_until_handshake_finished<'a>(
     Ok(())
 }
 
-async fn relay_until_handshake_finished(
-    inbound: &mut TcpStream,
-    outbound: &mut TcpStream,
+async fn relay_until_handshake_finished<
+    IOI: AsyncRead + AsyncWrite + Unpin,
+    IOO: AsyncRead + AsyncWrite + Unpin,
+>(
+    inbound: &mut IOI,
+    outbound: &mut IOO,
 ) -> io::Result<()> {
-    let (rin, win) = inbound.split();
-    let (rout, wout) = outbound.split();
+    let (rin, win) = tokio::io::split(inbound);
+    let (rout, wout) = tokio::io::split(outbound);
     let (a, b) = tokio::join!(
         copy_until_handshake_finished(rin, wout),
         copy_until_handshake_finished(rout, win)

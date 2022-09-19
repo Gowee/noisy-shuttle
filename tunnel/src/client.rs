@@ -3,8 +3,7 @@ use rustls::{
     ClientConnection as RustlsClientConnection, ContentType as TlsContentType, HandshakeType,
     ProtocolVersion, ServerName,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 use tracing::warn;
 use tracing::{debug, trace};
 
@@ -59,7 +58,7 @@ impl Client {
         }
     }
 
-    pub async fn connect(&self, mut stream: TcpStream) -> io::Result<SnowyStream> {
+    pub async fn connect<IO: AsyncRead + AsyncWrite + Unpin>(&self, mut stream: IO) -> io::Result<SnowyStream<IO>> {
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
             .build_initiator()
@@ -71,8 +70,7 @@ impl Client {
         session_id[..16].copy_from_slice(&psk_e[32..48]);
         session_id[16..].copy_from_slice(&self.totp.sign_current::<16>(&psk_e[0..32]));
         trace!(
-            "noise ping to {:?}, psk_e {:x?}, timesig: {:x?}",
-            &stream,
+            "noise ping, psk_e {:x?}, timesig: {:x?}",
             psk_e,
             &session_id[16..]
         );
@@ -168,9 +166,7 @@ impl Client {
             })?; // TODO: timeout
         if pong.len() < 5 + 48 {
             warn!(
-                "Noise handshake {} <-> {} failed. Wrong key or time out of sync?",
-                stream.local_addr().unwrap(),
-                stream.peer_addr().unwrap()
+                "Noise handshake failed. Wrong key or time out of sync?",
             );
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -180,8 +176,7 @@ impl Client {
         let e_ee: [u8; 48] = pong[5..5 + 48].try_into().unwrap(); // 32B pubkey + 16B AEAD cipher
         trace!(
             pad_len = pong.len() - (5 + 48),
-            "e, ee in {:?}: {:x?}",
-            stream,
+            "Noise handshake received e, ee: {:x?}",
             &e_ee
         );
         initiator
@@ -196,7 +191,7 @@ impl Client {
 
 async fn tls12_handshake(
     tlsconn: &mut RustlsClientConnection,
-    stream: &mut TcpStream,
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin + ?Sized),
     stop_after_server_ccs: bool,
 ) -> io::Result<()> {
     let mut buf: Vec<MaybeUninit<u8>> =
@@ -217,9 +212,7 @@ async fn tls12_handshake(
                     first_protocol = u16_from_be_slice(&buf[1..3]),
                     first_msglen = u16_from_be_slice(&buf[3..5]),
                     totallen = len,
-                    "tls handshake {} => {}, first type: {:?}",
-                    stream.local_addr().unwrap(),
-                    stream.peer_addr().unwrap(),
+                    "tls handshake C => S, first type: {:?}",
                     TlsContentType::from(buf[0]),
                 );
                 stream.write_all(&buf[..len]).await?;
@@ -232,9 +225,7 @@ async fn tls12_handshake(
                 trace!(
                     protocol = u16_from_be_slice(&buf[1..3]),
                     msglen = u16_from_be_slice(&buf[3..5]),
-                    "tls handshake {} <= {}, type: {:?}",
-                    stream.local_addr().unwrap(),
-                    stream.peer_addr().unwrap(),
+                    "tls handshake C <= S, type: {:?}",
                     TlsContentType::from(buf[0]),
                 );
                 let n = tlsconn
@@ -243,9 +234,7 @@ async fn tls12_handshake(
                 debug_assert_eq!(n, 5 + len);
                 tlsconn.process_new_packets().map_err(|e| {
                     debug!(
-                        "tls state error when handshaking {} <-> {}: {:?}",
-                        stream.local_addr().unwrap(),
-                        stream.peer_addr().unwrap(),
+                        "tls state error when handshaking: {:?}",
                         e
                     );
                     io::Error::new(
@@ -275,9 +264,7 @@ async fn tls12_handshake(
         }
     }
     trace!(
-        "tls handshake {} <-> {} done",
-        stream.local_addr().unwrap(),
-        stream.peer_addr().unwrap(),
+        "tls handshake done",
     );
     Ok(())
 }

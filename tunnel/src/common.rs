@@ -31,8 +31,8 @@ pub const DEFAULT_ALPN_PROTOCOLS: [&[u8]; 2] = [b"http/1.1".as_slice(), b"http/2
 const CONTEXT: &[u8] = b"the secure tunnel under snow";
 
 // #[derive(Debug)]
-pub struct SnowyStream {
-    pub(crate) socket: TcpStream,
+pub struct SnowyStream<IO> {
+    pub(crate) socket: IO,
     pub(crate) noise: TransportState,
     pub(crate) state: SnowyState,
     pub(crate) tls_deframer: MessageDeframer,
@@ -42,8 +42,8 @@ pub struct SnowyStream {
     pub(crate) write_offset: usize,
 }
 
-impl SnowyStream {
-    pub fn new(io: TcpStream, noise: TransportState) -> Self {
+impl<IO> SnowyStream<IO> {
+    pub fn new(io: IO, noise: TransportState) -> Self {
         SnowyStream {
             socket: io,
             noise,
@@ -56,22 +56,22 @@ impl SnowyStream {
         }
     }
 
-    pub fn as_inner(&self) -> &TcpStream {
+    pub fn as_inner(&self) -> &IO {
         &self.socket
     }
 
-    pub fn as_inner_mut(&mut self) -> &mut TcpStream {
+    pub fn as_inner_mut(&mut self) -> &mut IO {
         &mut self.socket
     }
 }
 
-impl fmt::Debug for SnowyStream {
+impl<IO> fmt::Debug for SnowyStream<IO> {
     fn fmt(&self, _fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         unimplemented!();
     }
 }
 
-impl AsyncRead for SnowyStream {
+impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for SnowyStream<IO> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -116,8 +116,7 @@ impl AsyncRead for SnowyStream {
                         .read_message(&message.payload.0, &mut this.read_buffer)
                         .map_err(|e| {
                             debug!(
-                                "noise read error on {:?}, message: {:#?}",
-                                this.socket, message
+                                "noise read error, message: {:#?}", message
                             );
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
@@ -128,8 +127,7 @@ impl AsyncRead for SnowyStream {
                     trace!(
                         pldlen = message.payload.0.len(),
                         plainlen = len,
-                        "tls message ready for {:?}, type: {:?}, version: {:?}",
-                        this.socket,
+                        "tls message ready type: {:?}, version: {:?}",
                         message.typ,
                         message.version,
                     );
@@ -182,7 +180,7 @@ impl AsyncRead for SnowyStream {
                         }
                         _ => {}
                     }
-                    debug!("read socket error, stream: {:?}, state: {:?}, error: {:?}, tls_frames: {:?}, buffer: PRIVATE, desynced: {:?}", this.socket, this.state, err, this.tls_deframer.frames, this.tls_deframer.desynced);
+                    debug!("read socket error, state: {:?}, error: {:?}, tls_frames: {:?}, buffer: PRIVATE, desynced: {:?}", this.state, err, this.tls_deframer.frames, this.tls_deframer.desynced);
                     return Poll::Ready(Err(err));
                 }
             }
@@ -191,7 +189,7 @@ impl AsyncRead for SnowyStream {
     }
 }
 
-impl AsyncWrite for SnowyStream {
+impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for SnowyStream<IO> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -234,8 +232,7 @@ impl AsyncWrite for SnowyStream {
                         if n == 0 {
                             this.state.shutdown_write();
                             debug!(
-                                "write zero, stream: {:?}, state: {:?}, buffered: {}/{}",
-                                this.socket,
+                                "write zero, state: {:?}, buffered: {}/{}",
                                 this.state,
                                 this.write_offset,
                                 this.write_buffer.len()
@@ -247,7 +244,7 @@ impl AsyncWrite for SnowyStream {
                         }
                     }
                     Poll::Ready(Err(e)) => {
-                        debug!("write socket error, stream: {:?}, state: {:?}, error: {:?}, buffered: {}/{}", this.socket, this.state, e, this.write_offset, this.write_buffer.len());
+                        debug!("write socket error, state: {:?}, error: {:?}, buffered: {}/{}", this.state, e, this.write_offset, this.write_buffer.len());
                         return Poll::Ready(Err(e));
                     }
                     Poll::Pending => {
@@ -291,8 +288,7 @@ impl AsyncWrite for SnowyStream {
             trace!(
                 plainlen = buf.len(),
                 msglen = this.write_buffer.len(),
-                "tls message constructed for {:?}",
-                this.socket
+                "tls message constructed",
             );
         }
     }
@@ -322,6 +318,12 @@ impl AsyncWrite for SnowyStream {
             // proceed even if state has already been unwritable
             // otherwise latter steps would be ignored in second poll calls
         }
+        trace!(
+            "snowy poll_shutdown, state: {:?}, buffered: {}/{}",
+            self.state,
+            self.write_offset,
+            self.write_buffer.len()
+        );
         // TODO: https://www.openssl.org/docs/man1.0.2/man3/SSL_shutdown.html
         // https://github.com/tokio-rs/tls/blob/56855b71661a9bf848c1a3c3f03ead6ac3f1b49f/tokio-rustls/src/client.rs#L235
         // self.send_warning_alert_no_log(AlertDescription::CloseNotify);
