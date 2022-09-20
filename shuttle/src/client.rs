@@ -8,10 +8,10 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::opt::CltOpt;
-use crate::preflighter::{
+use crate::connector::{
     AdHocConnector, Connector, Preflighter, PREFLIHGTER_CONNIDLE, PREFLIHGTER_EMA_COEFF,
 };
+use crate::opt::CltOpt;
 use crate::utils::DurationExt;
 
 pub async fn run_client(opt: CltOpt) -> Result<()> {

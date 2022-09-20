@@ -5,8 +5,8 @@ use structopt::StructOpt;
 use tracing::warn;
 
 mod client;
+mod connector;
 mod opt;
-mod preflighter;
 mod server;
 mod utils;
 

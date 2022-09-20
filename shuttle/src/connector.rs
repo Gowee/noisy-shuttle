@@ -9,12 +9,15 @@ use std::cmp;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::io;
-
 use std::sync::{Arc, Mutex};
+
+use crate::utils::DurationExt;
 
 use snowy_tunnel::{Client, SnowyStream};
 
+/// Time limit by which a preflighted connection is seen as idle
 pub const PREFLIHGTER_CONNIDLE: usize = 120;
+/// Coefficient for computing the exponential moving average of handshake time
 pub const PREFLIHGTER_EMA_COEFF: f32 = 1.0 / 3.0;
 
 #[async_trait]
@@ -24,7 +27,6 @@ pub trait Connector {
 
 #[derive(Debug)]
 pub struct Preflighter {
-    // client: C,
     queue: Arc<Queue<(JoinHandle<io::Result<SnowyStream>>, Instant)>>,
     average_handshake_time: Arc<Mutex<f32>>,
     cumulative_handshake_delay: Mutex<f32>,
@@ -106,7 +108,7 @@ impl Preflighter {
             debug!(
                 preflight_pending = self.queue.len(),
                 preflight_capacity = self.queue.capacity(),
-                "one idle ready connection timeout, decrease preflight",
+                "one ready connection reaches CONNIDLE, decrease preflight",
             );
         }
         let t2 = Instant::now();
@@ -138,7 +140,7 @@ impl Preflighter {
                     debug!(
                         preflight_capacity = self.queue.capacity(),
                         chd = chd,
-                        "PREFLIGHT: increase preflight to accommodate cumulative handshake delay",
+                        "increase preflight to accommodate cumulative handshake delay",
                     );
                 }
                 Ok((s, t1))
@@ -154,7 +156,12 @@ impl Preflighter {
 #[async_trait]
 impl Connector for Preflighter {
     async fn connect(&self) -> io::Result<SnowyStream> {
-        let (s, _t) = self.get().await?;
+        let (s, t) = self.get().await?;
+        debug!(
+            "preflighted {:?} {} ago",
+            s.as_inner(),
+            t.elapsed().autofmt()
+        );
         Ok(s)
     }
 }
@@ -177,7 +184,9 @@ impl AdHocConnector {
 #[async_trait]
 impl Connector for AdHocConnector {
     async fn connect(&self) -> io::Result<SnowyStream> {
+        let t = Instant::now();
         let s = TcpStream::connect(self.remote_addr.as_str()).await?;
+        debug!("handshaked {:?} within {}", s, t.elapsed().autofmt());
         self.client.connect(s).await
     }
 }
