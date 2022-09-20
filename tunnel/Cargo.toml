@@ -17,3 +17,4 @@ blake2 = "0.10"
 tracing = "0.1"
 lru = "0.7"
 ja3-rustls = { version = "0.0", git = "https://github.com/gowee/ja3-rustls.git", features = ["rand"] }
+itertools = "0.10"

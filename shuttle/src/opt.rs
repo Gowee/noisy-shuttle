@@ -2,6 +2,7 @@ use ja3_rustls::{ConcatenatedParser, Ja3};
 use structopt::clap::AppSettings::{ColoredHelp, DeriveDisplayOrder};
 use structopt::StructOpt;
 
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
@@ -57,7 +58,7 @@ pub struct CltOpt {
     #[structopt(long = "tls-versions", name = "supported versions", parse(try_from_str = parse_u16_array))]
     pub tls_versions: Option<Array<u16>>,
 
-    // Key Share to apply to ClientHello, seperated by comma (only X25519 and GREASE are allowed so far)
+    // Key Share curves to apply to ClientHello, seperated by comma (only X25519 and GREASE are allowed so far)
     #[structopt(long = "tls-keyshare", name = "keyshare", parse(try_from_str = parse_u16_array))]
     pub tls_keyshare: Option<Array<u16>>,
 }
@@ -92,7 +93,7 @@ impl CltOpt {
             alpn: self.tls_alpn.clone(),
             signature_algos: self.tls_sigalgos.clone(),
             supported_versions: self.tls_versions.clone(),
-            key_share: self.tls_keyshare.clone(),
+            keyshare_curves: self.tls_keyshare.clone(),
         }
     }
 

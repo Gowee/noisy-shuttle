@@ -21,12 +21,12 @@ lazy_static! {
 }
 
 pub const TLS_RECORD_HEADER_LENGTH: usize = 5; // 1 type + 2 proto ver + 2 data len
-pub const MAXIMUM_CIPHERTEXT_LENGTH: usize = 2usize.pow(14); // 2**14B = 16KiB < show::constants::MAXMSGLEN
+pub const MAXIMUM_CIPHERTEXT_LENGTH: usize = 2usize.pow(14); // 2**14 B = 16 KiB < show::constants::MAXMSGLEN
 pub const AEAD_TAG_LENGTH: usize = 16; // show::constants::TAGLEN
 pub const MAXIMUM_PLAINTEXT_LENGTH: usize = MAXIMUM_CIPHERTEXT_LENGTH - AEAD_TAG_LENGTH;
 pub const PSKLEN: usize = 32; // snow::constants::PSKLEN;
 
-pub const DEFAULT_ALPN_PROTOCOLS: [&[u8]; 2] = [b"http/1.1".as_slice(), b"http/2".as_slice()];
+pub const DEFAULT_ALPN_PROTOCOLS: [&[u8]; 2] = [b"http/2".as_slice(), b"http/1.1".as_slice()];
 
 const CONTEXT: &[u8] = b"the secure tunnel under snow";
 
@@ -66,8 +66,16 @@ impl SnowyStream {
 }
 
 impl fmt::Debug for SnowyStream {
-    fn fmt(&self, _fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        unimplemented!();
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        fmt.debug_struct("SnowyStream")
+            .field("socket", &self.socket)
+            .field("noise", &self.noise)
+            .field("state", &self.state)
+            .field("tls_deframer.frames", &self.tls_deframer.frames)
+            .field("tls_deframer.desynced", &self.tls_deframer.desynced)
+            .field("read_buffer", &&self.read_buffer[self.read_offset..])
+            .field("write_buffer", &&self.write_buffer[self.write_offset..])
+            .finish()
     }
 }
 
@@ -182,7 +190,7 @@ impl AsyncRead for SnowyStream {
                         }
                         _ => {}
                     }
-                    debug!("read socket error, stream: {:?}, state: {:?}, error: {:?}, tls_frames: {:?}, buffer: PRIVATE, desynced: {:?}", this.socket, this.state, err, this.tls_deframer.frames, this.tls_deframer.desynced);
+                    debug!("read socket error on {:?}: {:?}", this, err);
                     return Poll::Ready(Err(err));
                 }
             }

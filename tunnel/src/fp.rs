@@ -1,18 +1,20 @@
 use hex_literal::hex;
+use itertools::Itertools;
 use ja3_rustls::{is_grease_u16_be, try_regrease_u16_be, Ja3};
 use rustls::internal::msgs::base::Payload;
 use rustls::internal::msgs::codec::Codec;
-use rustls::internal::msgs::enums::ExtensionType;
+use rustls::internal::msgs::enums::{ExtensionType, NamedCurve};
 use rustls::internal::msgs::handshake::{
     ClientExtension, ConvertProtocolNameList, HandshakeMessagePayload, HandshakePayload,
     KeyShareEntry, ProtocolNameList, UnknownExtension,
 };
 use rustls::internal::msgs::message::{Message, MessagePayload};
+use rustls::{ProtocolVersion, SignatureScheme};
 
 use tracing::{debug, trace, warn};
 
 use std::collections::HashMap;
-
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
 use crate::try_assign;
@@ -20,13 +22,13 @@ use crate::try_assign;
 const RFC7685_PADDING_TARGET: usize = 512;
 
 /// TLS ClientHello fingerprints
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct FingerprintSpec {
     pub ja3: Option<Ja3>,
     pub alpn: Option<Vec<Vec<u8>>>,
     pub signature_algos: Option<Vec<u16>>,
     pub supported_versions: Option<Vec<u16>>,
-    pub key_share: Option<Vec<u16>>,
+    pub keyshare_curves: Option<Vec<u16>>,
 }
 
 impl FingerprintSpec {
@@ -44,7 +46,7 @@ impl FingerprintSpec {
             && self.alpn.is_none()
             && self.signature_algos.is_none()
             && self.supported_versions.is_none()
-            && self.key_share.is_none()
+            && self.keyshare_curves.is_none()
     }
 
     pub fn overwrite_client_hello(
@@ -80,17 +82,52 @@ impl FingerprintSpec {
     }
 }
 
-// impl From<Ja3> for FingerprintSpec {
-//     fn from(ja3:Ja3) -> Self {
-//         Self {
-//             ja3,
-//             alpn: Default::default(),
-//             signature_algos: Default::default(),
-//             supported_versions: Default::default(),
-//             key_share: Default::default(),
-//         }
-//     }
-// }
+impl Debug for FingerprintSpec {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let mut d = f.debug_struct("FingerprintSpec");
+        if let Some(ref ja3) = self.ja3 {
+            d.field("version", &ja3.version_to_typed())
+                .field("ciphers", &ja3.ciphers_as_typed().format(" "))
+                .field("extensions", &ja3.extensions_as_typed().format(" "))
+                .field("curves", &ja3.curves_as_typed().format(" "))
+                .field("point_formats", &ja3.point_formats_as_typed().format(" "));
+        }
+        if let Some(ref alpn) = self.alpn {
+            d.field(
+                "alpn",
+                &alpn.iter().map(|p| String::from_utf8_lossy(p)).format(" "),
+            );
+        }
+        if let Some(ref vers) = self.supported_versions {
+            d.field(
+                "supported_versions",
+                &vers
+                    .iter()
+                    .map(|&ver| ProtocolVersion::from(ver))
+                    .format(" "),
+            );
+        }
+        if let Some(ref algos) = self.signature_algos {
+            d.field(
+                "signature_algos",
+                &algos
+                    .iter()
+                    .map(|&algo| SignatureScheme::from(algo))
+                    .format(" "),
+            );
+        }
+        if let Some(ref curves) = self.keyshare_curves {
+            d.field(
+                "keyshare_curves",
+                &curves
+                    .iter()
+                    .map(|&curve| NamedCurve::from(curve))
+                    .format(" "),
+            );
+        }
+        d.finish()
+    }
+}
 
 /// Apply a JA3 fingerprint to a ClientHello [`Message`].
 ///
@@ -256,7 +293,7 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                         );
                     }
                     KeyShare(entries) => {
-                        if let Some(fpents) = fp.key_share.as_ref() {
+                        if let Some(fpents) = fp.keyshare_curves.as_ref() {
                             let mut oldentmap: HashMap<_, _> = entries
                                 .iter()
                                 .map(|ent| (ent.group.get_u16(), ent))

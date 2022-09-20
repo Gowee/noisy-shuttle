@@ -69,7 +69,7 @@ impl Client {
         let random = <[u8; 32]>::try_from(&psk_e[0..32]).unwrap();
         let mut session_id = [0u8; 32];
         session_id[..16].copy_from_slice(&psk_e[32..48]);
-        session_id[16..].copy_from_slice(&self.totp.sign_current::<16>(&psk_e[0..32]));
+        session_id[16..].copy_from_slice(&self.totp.sign_current::<16>(&psk_e[0..32])); // timesig
         trace!(
             "noise ping to {:?}, psk_e {:x?}, timesig: {:x?}",
             &stream,
@@ -86,7 +86,7 @@ impl Client {
             .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
             .with_no_client_auth();
         if let Some(ref ja3) = self.fingerprint_spec.ja3 {
-            // fingerprint_spec.alpn is effective iff alpn is set in ja3,
+            // fingerprint_spec.alpn is effective iff alpn is set in ja3
             if ja3
                 .extensions_as_typed()
                 .any(|ext| ext == ExtensionType::ALProtocolNegotiation)
@@ -142,8 +142,8 @@ impl Client {
                 // handshake procedures any more. Actually, even Server Hello can also be
                 // fabricated locally without be distinguished. Here the fingerprint in ServerHello
                 // is useful, though.
-                // TODO: Cache it for latter use instead of request camouflage server every time.
-                // TODO: send mibble box compatibility CCS and more ApplicationData frames now, as
+                // TODO: Cache SH for latter use instead of request camouflage server every time.
+                // TODO: Send mibble box compatibility CCS and more ApplicationData frames, as
                 //   in typical TLS 1.3 handshake.
             }
             _ => {
@@ -177,7 +177,7 @@ impl Client {
                 "Noise handshake failed due to message length shorter than expected",
             ));
         }
-        let e_ee: [u8; 48] = pong[5..5 + 48].try_into().unwrap(); // 32B pubkey + 16B AEAD cipher
+        let e_ee: [u8; 48] = pong[5..5 + 48].try_into().unwrap(); // 32B pubkey + 16B AEAD tag
         trace!(
             pad_len = pong.len() - (5 + 48),
             "e, ee in {:?}: {:x?}",

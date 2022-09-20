@@ -209,11 +209,11 @@ impl From<io::Error> for AcceptError {
     }
 }
 
+// Adapted from: https://github.com/ihciah/shadow-tls/blob/2bbdc26cff1120ba9c8eded39ad743c4c4f687c4/src/protocol.rs#L138
 async fn copy_until_handshake_finished<'a>(
     mut read_half: ReadHalf<'a>,
     mut write_half: WriteHalf<'a>,
 ) -> io::Result<()> {
-    //  Adapted from: https://github.com/ihciah/shadow-tls/blob/2bbdc26cff1120ba9c8eded39ad743c4c4f687c4/src/protocol.rs#L138
     const HANDSHAKE: u8 = 0x16;
     const CHANGE_CIPHER_SPEC: u8 = 0x14;
     // header_buf is used to read handshake frame header, will be a fixed size buffer.
