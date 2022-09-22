@@ -167,15 +167,16 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
         pong[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30 + pad_len as u8]);
         let len = responder
             .write_message(&[], &mut pong[5..])
-            .expect("Valid NOISE state");
+            .expect("Noise state valid");
         debug_assert_eq!(len, 48);
-        trace!(pad_len, "e, ee from {:?}: {:x?}", inbound, &pong[5..5 + 48]);
+        trace!(pad_len, "e, ee to {:?}: {:x?}", inbound, &pong[5..5 + 48]);
         inbound.write_all(&pong[..5 + 48 + pad_len]).await?;
         // but, is uniform random length of initial messages a characteristic per se?
 
         let responder = responder
             .into_transport_mode()
-            .expect("NOISE handshake done");
+            .expect("Noise handshake done");
+        trace!("noise handshake done with {:?}", inbound);
         Ok(SnowyStream::new(inbound, responder))
     }
 }

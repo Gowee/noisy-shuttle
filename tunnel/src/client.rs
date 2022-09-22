@@ -180,7 +180,7 @@ impl Client {
         let e_ee: [u8; 48] = pong[5..5 + 48].try_into().unwrap(); // 32B pubkey + 16B AEAD tag
         trace!(
             pad_len = pong.len() - (5 + 48),
-            "e, ee in {:?}: {:x?}",
+            "e, ee from {:?}: {:x?}",
             stream,
             &e_ee
         );
@@ -190,6 +190,7 @@ impl Client {
         let noise = initiator
             .into_transport_mode()
             .expect("Noise handshake done");
+        trace!("noise handshake done with {:?}", stream);
         Ok(SnowyStream::new(stream, noise))
     }
 }

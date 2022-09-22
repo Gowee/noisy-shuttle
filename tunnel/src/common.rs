@@ -151,7 +151,6 @@ impl AsyncRead for SnowyStream {
             if has_read {
                 break 'read_more;
             }
-
             // otherwise, read the underlying socket
             match this.tls_deframer.read(&mut SyncReadAdapter {
                 io: &mut this.socket,

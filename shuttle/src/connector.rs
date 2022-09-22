@@ -99,55 +99,61 @@ impl Preflighter {
 
     // #[instrument(level = "trace")]
     pub async fn get(&self) -> io::Result<(SnowyStream, Instant)> {
-        let (h, t1) = self.queue.pop().await;
-        if t1.elapsed().as_secs() as usize > PREFLIHGTER_CONNIDLE {
-            debug_assert!(self.queue.capacity() > 0);
-            self.queue
-                .resize(cmp::max(self.queue.capacity() - 1, self.min))
-                .await;
-            debug!(
-                preflight_pending = self.queue.len(),
-                preflight_capacity = self.queue.capacity(),
-                "one ready connection reaches CONNIDLE, decrease preflight",
-            );
-        }
-        let t2 = Instant::now();
-        match h.await.unwrap() {
-            Ok(s) => {
-                let aht = *self.average_handshake_time.lock().unwrap(); // lock dropped immediately
-                let chd = {
-                    let mut chd = self.cumulative_handshake_delay.lock().unwrap();
-                    *chd += t2.elapsed().as_secs_f32();
-                    let old_chd = *chd;
-                    if *chd > aht {
-                        *chd -= aht;
-                    }
-                    old_chd
-                };
+        let mut errcnt = 0;
+        loop {
+            let (h, t1) = self.queue.pop().await;
+            if t1.elapsed().as_secs() as usize > PREFLIHGTER_CONNIDLE {
+                debug_assert!(self.queue.capacity() > 0);
+                self.queue
+                    .resize(cmp::max(self.queue.capacity() - 1, self.min))
+                    .await;
                 debug!(
-                    chd = chd,
-                    chd_delta = t2.elapsed().as_secs_f32(),
-                    aht = aht,
-                    "accumulate handshake delay"
+                    preflight_pending = self.queue.len(),
+                    preflight_capacity = self.queue.capacity(),
+                    "one ready connection reaches CONNIDLE, decrease preflight",
                 );
-                if chd > aht {
-                    self.queue
-                        .resize(cmp::min(
-                            self.queue.capacity() + 1,
-                            self.max.unwrap_or(usize::MAX),
-                        ))
-                        .await;
-                    debug!(
-                        preflight_capacity = self.queue.capacity(),
-                        chd = chd,
-                        "increase preflight to accommodate cumulative handshake delay",
-                    );
-                }
-                Ok((s, t1))
             }
-            Err(e) => {
-                warn!("preflighter got error when handshaking: {}", e);
-                Err(e)
+            let t2 = Instant::now();
+            match h.await.unwrap() {
+                Ok(s) => {
+                    let aht = *self.average_handshake_time.lock().unwrap(); // lock dropped immediately
+                    let chd = {
+                        let mut chd = self.cumulative_handshake_delay.lock().unwrap();
+                        *chd += t2.elapsed().as_secs_f32();
+                        let old_chd = *chd;
+                        if *chd > aht {
+                            *chd -= aht;
+                        }
+                        old_chd
+                    };
+                    debug!(
+                        chd = chd,
+                        chd_delta = t2.elapsed().as_secs_f32(),
+                        aht = aht,
+                        "accumulate handshake delay"
+                    );
+                    if chd > aht {
+                        self.queue
+                            .resize(cmp::min(
+                                self.queue.capacity() + 1,
+                                self.max.unwrap_or(usize::MAX),
+                            ))
+                            .await;
+                        debug!(
+                            preflight_capacity = self.queue.capacity(),
+                            chd = chd,
+                            "increase preflight to accommodate cumulative handshake delay",
+                        );
+                    }
+                    return Ok((s, t1));
+                }
+                Err(e) => {
+                    warn!("preflighter got error when handshaking: {}", e);
+                    errcnt += 1;
+                    if errcnt == self.queue.capacity() {
+                        return Err(e);
+                    }
+                }
             }
         }
     }

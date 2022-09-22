@@ -69,9 +69,9 @@ pub struct SvrOpt {
     #[structopt(name = "LISTEN_ADDR")]
     pub listen_addr: SocketAddr,
 
-    /// Upstream HOST:PORT address to proxy
-    #[structopt(name = "REMOTE_ADDR")]
-    pub remote_addr: String,
+    /// Upstream HOST:PORT address to proxy or "BUILTIN_HTTP_PROXY"
+    #[structopt(name = "UPSTREAM")]
+    pub upstream: String,
 
     /// Camouflage HOST:PORT address to connect to for replicating TLS handshaking
     #[structopt(name = "CAMOUFLAGE_ADDR")]
