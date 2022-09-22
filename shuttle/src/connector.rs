@@ -78,11 +78,14 @@ impl Preflighter {
                 let t = Instant::now();
                 let s = TcpStream::connect(remote_addr.as_str()).await;
                 let r = client.connect(s?).await;
-                if r.is_ok() {
-                    let mut aht = average_handshake_time.lock().unwrap();
-                    *aht = t.elapsed().as_secs_f32() * PREFLIHGTER_EMA_COEFF
-                        + *aht * (1.0 - PREFLIHGTER_EMA_COEFF);
-                    debug!(aht = *aht, "update average handshake time"); // TODO: drop lock before logging
+                match &r {
+                    Ok(_) => {
+                        let mut aht = average_handshake_time.lock().unwrap();
+                        *aht = t.elapsed().as_secs_f32() * PREFLIHGTER_EMA_COEFF
+                            + *aht * (1.0 - PREFLIHGTER_EMA_COEFF);
+                        debug!(aht = *aht, "update average handshake time"); // TODO: drop lock before logging
+                    }
+                    Err(e) => warn!("preflighter got error when handshaking: {}", e),
                 }
                 r
             });
@@ -148,7 +151,7 @@ impl Preflighter {
                     return Ok((s, t1));
                 }
                 Err(e) => {
-                    warn!("preflighter got error when handshaking: {}", e);
+                    // warn!("preflighter got error when handshaking: {}", e);
                     errcnt += 1;
                     if errcnt == self.queue.capacity() {
                         return Err(e);

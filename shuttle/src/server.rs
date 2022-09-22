@@ -158,6 +158,8 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
     }
 }
 
+const HTTP_200_CONNECTION_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\nX-Padding: X-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-Padding \r\n\r\n";
+
 async fn upgrade_to_http_proxy_stream(snowys: &mut SnowyStream) -> io::Result<(Vec<u8>, String)> {
     let mut buf = unsafe { String::from_utf8_unchecked(vec![0u8; 4096]) };
     let mut start = 0;
@@ -204,9 +206,7 @@ async fn upgrade_to_http_proxy_stream(snowys: &mut SnowyStream) -> io::Result<(V
             let mut buf = buf.into_bytes();
             buf.drain(end..);
             buf.drain(..start);
-            snowys
-                .write_all(b"HTTP/1.0 200 Connection Established\r\n\r\n")
-                .await?;
+            snowys.write_all(HTTP_200_CONNECTION_ESTABLISHED).await?;
             snowys.flush().await?;
             Ok((buf, dest))
         }

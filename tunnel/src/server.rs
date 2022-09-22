@@ -95,6 +95,7 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
         {
             return Err(Unauthenticated { buf, io: inbound });
         }
+        debug!("authenticated {:?}", &inbound);
         {
             let mut rf = self.replay_filter.lock().unwrap();
             if let Some(&client_id) = rf.get(&e) {
