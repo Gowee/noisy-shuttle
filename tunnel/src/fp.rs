@@ -1,6 +1,6 @@
 use hex_literal::hex;
 use itertools::Itertools;
-use ja3_rustls::{is_grease_u16_be, try_regrease_u16_be, Ja3};
+use ja3_rustls::{grease_u16_be, is_grease_u16_be, try_regrease_u16_be, Ja3};
 use rustls::internal::msgs::base::Payload;
 use rustls::internal::msgs::codec::Codec;
 use rustls::internal::msgs::enums::{ExtensionType, NamedCurve};
@@ -244,16 +244,48 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
             }
 
             // rewrite extension values
+            let mut grease_curves = vec![];
             for extension in chp.extensions.iter_mut() {
                 use ClientExtension::*;
                 match extension {
+                    // curves used by KeyShare should be a subset of of those specificed here
                     NamedGroups(groups) => {
-                        try_assign!(
-                            *groups,
-                            fp.ja3
-                                .as_ref()
-                                .map(|ja3| ja3.curves_regreasing_as_typed().collect())
-                        );
+                        if grease_curves.is_empty() {
+                            try_assign!(
+                                *groups,
+                                fp.ja3.as_ref().map(|ja3| ja3
+                                    .curves
+                                    .iter()
+                                    .map(|&curve| match is_grease_u16_be(curve) {
+                                        true => {
+                                            let g = grease_u16_be();
+                                            grease_curves.push(g);
+                                            g
+                                        }
+                                        false => curve,
+                                    }
+                                    .into())
+                                    .collect())
+                            );
+                        } else {
+                            try_assign!(
+                                *groups,
+                                fp.ja3.as_ref().map(|ja3| ja3
+                                    .curves
+                                    .iter()
+                                    .map(|&curve| {
+                                        match is_grease_u16_be(curve) {
+                                            true => match grease_curves.pop() {
+                                                Some(g) => g,
+                                                None => grease_u16_be(),
+                                            },
+                                            false => curve,
+                                        }
+                                        .into()
+                                    })
+                                    .collect())
+                            );
+                        }
                     }
                     ECPointFormats(formats) => {
                         try_assign!(
@@ -293,23 +325,55 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                         );
                     }
                     KeyShare(entries) => {
-                        if let Some(fpents) = fp.keyshare_curves.as_ref() {
+                        if let Some(fpcurves) = fp.keyshare_curves.as_ref() {
                             let mut oldentmap: HashMap<_, _> = entries
                                 .iter()
                                 .map(|ent| (ent.group.get_u16(), ent))
                                 .collect();
                             let mut new_entries = vec![];
-                            for &ent in fpents {
-                                match oldentmap.remove(&ent) {
-                                    Some(entry) => new_entries.push(entry.clone()),
-                                    None => {
-                                        if !is_grease_u16_be(ent) {
-                                            warn!("TLS Key Share of curve {} is not present in original ClientHello. A empty payload is used, which makes traffic look distinctive.", ent);
+                            if grease_curves.is_empty() {
+                                for &curve in fpcurves {
+                                    match oldentmap.remove(&curve) {
+                                        Some(entry) => new_entries.push(entry.clone()),
+                                        None => {
+                                            let curve = match is_grease_u16_be(curve) {
+                                                true => {
+                                                    let g = grease_u16_be();
+                                                    grease_curves.push(g);
+                                                    g
+                                                }
+                                                false => {
+                                                    warn!("TLS Key Share of curve {} is not present in original ClientHello. A empty payload is used, which makes traffic look distinctive.", curve);
+                                                    curve
+                                                }
+                                            };
+                                            new_entries
+                                                .push(KeyShareEntry::new(curve.into(), &[0x00]));
                                         }
-                                        new_entries.push(KeyShareEntry::new(
-                                            try_regrease_u16_be(ent).into(),
-                                            &[0x00],
-                                        ));
+                                    }
+                                }
+                            } else {
+                                for &curve in fpcurves {
+                                    match oldentmap.remove(&curve) {
+                                        Some(entry) => new_entries.push(entry.clone()),
+                                        None => {
+                                            let curve = match is_grease_u16_be(curve) {
+                                                true => {
+                                                    match grease_curves.pop() {
+                                                        Some(curve) => curve,
+                                                        // TODO: some server might reject GREASE
+                                                        //   values not present in NamedGroups
+                                                        None => grease_u16_be(),
+                                                    }
+                                                }
+                                                false => {
+                                                    warn!("TLS Key Share of curve {} is not present in original ClientHello. A empty payload is used, which makes traffic look distinctive.", curve);
+                                                    curve
+                                                }
+                                            };
+                                            new_entries
+                                                .push(KeyShareEntry::new(curve.into(), &[0x00]));
+                                        }
                                     }
                                 }
                             }
