@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 
+use rand::{thread_rng, Rng};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tracing::{debug, info, instrument, trace, warn};
@@ -73,7 +74,6 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
     use snowy_tunnel::AcceptError::*;
     match server.accept(inbound).await {
         Ok(mut snowys) => {
-            snowys.flush().await.unwrap();
             let (buf, outbound) = match opt.upstream.as_str() {
                 UPSTREAM_HTTP_PROXY => {
                     let (buf, dest_addr) = upgrade_to_http_proxy_stream(&mut snowys)
@@ -119,16 +119,25 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
             warn!("failed to accept connection from {}: {}", &client_addr, e);
             Err(e)
         }
-        Err(ServerHelloInvalid { outbound, .. }) => {
+        Err(ServerHelloInvalid {
+            buf,
+            mut inbound,
+            mut outbound,
+        }) => {
             warn!(
                 "invalid server hello received from {} when handling {}",
                 outbound.peer_addr().unwrap().to_string(),
                 &client_addr
             );
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid server hello received from camouflage server",
-            ))
+            // an invalid ServerHello might be the result of a strange ClientHello fabricated by
+            // a malicious client, so just copy_bidi as usual in this case
+            Ok(async {
+                inbound.write_all(&buf).await?;
+                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await
+                // TODO: log
+            }
+            .await
+            .unwrap_or((0, 0)))
         }
         Err(e) => {
             let (buf, mut io, note) = match e {
@@ -158,9 +167,9 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
     }
 }
 
-const HTTP_200_CONNECTION_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\nX-Padding: X-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-Padding \r\n\r\n";
-
 async fn upgrade_to_http_proxy_stream(snowys: &mut SnowyStream) -> io::Result<(Vec<u8>, String)> {
+    // TODO: this is a over-simplified dirty implementation, a robust one is needed
+    const HTTP_200_CONNECTION_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\nX-Padding: X-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-Padding \r\n\r\n";
     let mut buf = unsafe { String::from_utf8_unchecked(vec![0u8; 4096]) };
     let mut start = 0;
     let mut end = 0;
@@ -206,7 +215,10 @@ async fn upgrade_to_http_proxy_stream(snowys: &mut SnowyStream) -> io::Result<(V
             let mut buf = buf.into_bytes();
             buf.drain(end..);
             buf.drain(..start);
-            snowys.write_all(HTTP_200_CONNECTION_ESTABLISHED).await?;
+            let n = thread_rng().gen_range(200..HTTP_200_CONNECTION_ESTABLISHED.len());
+            snowys
+                .write_all(&HTTP_200_CONNECTION_ESTABLISHED[..n])
+                .await?;
             snowys.flush().await?;
             Ok((buf, dest))
         }

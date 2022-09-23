@@ -18,3 +18,4 @@ snowy-tunnel = { path = "../tunnel" }
 deadqueue = { version = "0.2", features = ["resizable"] }
 ja3-rustls = { version = "0.0", git = "https://github.com/gowee/ja3-rustls.git" }
 async-trait = "0.1.57"
+rand = "0.8"
