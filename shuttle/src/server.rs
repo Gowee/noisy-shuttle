@@ -7,6 +7,7 @@ use tracing::{debug, info, instrument, trace, warn};
 
 use std::fmt::Debug;
 use std::io;
+use std::mem::{self, MaybeUninit};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -169,7 +170,7 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
 
 async fn upgrade_to_http_proxy_stream(snowys: &mut SnowyStream) -> io::Result<(Vec<u8>, String)> {
     // TODO: this is a over-simplified dirty implementation, a robust one is needed
-    const HTTP_200_CONNECTION_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\nX-Padding: X-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-Padding \r\n\r\n";
+    const HTTP_200_CONNECTION_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\nX-Padding: X-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-Padding ";
     let mut buf = unsafe { String::from_utf8_unchecked(vec![0u8; 4096]) };
     let mut start = 0;
     let mut end = 0;
@@ -216,9 +217,14 @@ async fn upgrade_to_http_proxy_stream(snowys: &mut SnowyStream) -> io::Result<(V
             buf.drain(end..);
             buf.drain(..start);
             let n = thread_rng().gen_range(200..HTTP_200_CONNECTION_ESTABLISHED.len());
-            snowys
-                .write_all(&HTTP_200_CONNECTION_ESTABLISHED[..n])
-                .await?;
+            let mut response: Vec<MaybeUninit<u8>> = Vec::with_capacity(n + 4);
+            let mut response: Vec<u8> = unsafe {
+                response.set_len(response.capacity());
+                mem::transmute(response)
+            };
+            response[..n].copy_from_slice(&HTTP_200_CONNECTION_ESTABLISHED[..n]);
+            response[n..].copy_from_slice(b"\r\n\r\n");
+            snowys.write_all(&response).await?;
             snowys.flush().await?;
             Ok((buf, dest))
         }
