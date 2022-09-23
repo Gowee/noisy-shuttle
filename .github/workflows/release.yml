@@ -1,0 +1,99 @@
+name: "Release"
+
+on:
+  push:
+    branches:
+      # - main
+      - dev
+    tags:
+      - v*
+  # release:
+  #   types: [created]
+
+jobs:
+  compile:
+    name: release ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-gnu
+            os: windows-2019
+            cross: false
+            # archive: zip
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+            # archive: tar.gz tar.xz
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+            # archive: zip
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+          profile: minimal
+      - name: Build with cargo
+        run: cargo build --release --target ${{ matrix.target }}
+        if: matrix.cross == false
+      - name: Build with cross
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross.git
+          cross build --release --target ${{ matrix.target }}
+        if: matrix.cross == true
+      # some error with the default cross version
+      # - uses: actions-rs/cargo@v1
+      #   with:
+      #     command: build
+      #     args: --manifest-path cli/Cargo.toml --release --target ${{ matrix.target }}
+      #     use-cross: ${{ matrix.cross }}
+      - name: Prepare asset
+        shell: bash # on win, the default is ps
+        run: |
+          mkdir bin
+          if [ "${{ matrix.os }}" = "windows-2019" ]; then
+            # 7z a "$staging.zip" "$staging"
+            f="bin/noisy-shuttle-${{ matrix.target }}.exe"
+            mv target/${{ matrix.target }}/release/noisy-shuttle.exe "$f"
+          else
+            # tar czf "$staging.tar.gz" "$staging"
+            f="bin/noisy-shuttle-${{ matrix.target }}"
+            mv target/${{ matrix.target }}/release/noisy-shuttle "$f"
+          fi
+          strip -v "$f" || echo "strip failed"
+        working-directory: ./cli
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: binaries
+          path: cli/bin/
+
+  release:
+    runs-on: ubuntu-latest
+    if: "startsWith(github.ref, 'refs/tags/')"
+    needs: [compile]
+    steps:
+      - uses: actions/download-artifact@v2
+        with:
+          name: binaries
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            *
+
+# adapted from https://github.com/Gowee/noisy-shuttle-rs/blob/main/.github/workflows/release.yml
