@@ -75,12 +75,11 @@ jobs:
             mv target/${{ matrix.target }}/release/noisy-shuttle "$f"
           fi
           strip -v "$f" || echo "strip failed"
-        working-directory: ./cli
       - name: Upload artifact
         uses: actions/upload-artifact@v3
         with:
           name: binaries
-          path: cli/bin/
+          path: bin/
 
   release:
     runs-on: ubuntu-latest
