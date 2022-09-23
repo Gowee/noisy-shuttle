@@ -1,5 +1,8 @@
 # noisy-shuttle
 
+[![Build](https://github.com/Gowee/noisy-shuttle/actions/workflows/build.yml/badge.svg)](https://github.com/Gowee/noisy-shuttle/actions/workflows/build.yml)
+[![GitHub Release](https://img.shields.io/github/release/Gowee/noisy-shuttle.svg?style=flat)]()  
+
 <!--noisy-shuttle establishes a secure tunnel encrypted by Noise for circumventing Internet censorship. It starts with replicating authentic TLS handshakes of a camouflage website. Along with the TLS handshaks, a covert authentication and DH key exchange is piggybacked by the client random and session id field in TLS ClientHello messages.-->
 
 noisy-shuttle establishes a secure tunnel encrypted by [Noise](http://noiseprotocol.org/) for circumventing Internet censorship. The Noise handshake is piggybacked by authentic TLS handshakes relayed by the server between the client and a camouflage website. By the end of TLS handshakes, a Noise tunnel is established covertly with forward secrecy.
@@ -17,19 +20,19 @@ noisy-shuttle is essentially shadow-tls + trojan + shadowsocks. -->
   - Basically indistinguishable from legit TLS traffic
 
 - PSK-based covert authentication piggybacked by TLS client random and session id field
-  - Immune to active probes by falling back to dumb relay between a malicious client and a camouflage website
+  - Immune to active probes by falling back to dumb relay between a malicious client and the camouflage website
 
 - AEAD encrypted traffic with forward secrecy via ECDHE
-  - Never worry about the traffic being recorded the big brother for long
+  - Never worry about the traffic being recorded by the big brother for long
 
 - Customizable TLS client fingerprints specified via Cli option
-  - Replicate TLS fingerprints listed in https://tlsfingerprint.io
+  - Replicate any fingerprints listed in https://tlsfingerprint.io exactly
 
 ## Handshaking procedures
-- On starting, shuttle client listens on localhost. When received a request, shuttle client fabricate a legit TLS ClientHello and send it to shuttle server. Unlike a typical TLS handshake, the client random and session id field of the ClientHello totaling 64 bytes, which should have been randomly generated, are filled with a ephemeral X25519 public key and a AEAD tag as a part of the Noise [NNPsk0 handshake](https://noiseexplorer.com/patterns/NNpsk0/). And then it proceeds to make TLS handshakes as typical.
-- When shuttle server received a ClientHello, it tries to pull the public key and the AEAD tag from the ClientHello and authenticate them with Noise against a pre-shared key. shuttle server then forwards the ClientHello  to a camouflage website and relaying subsequent TLS handshake messages between shuttle client and the camouflage server until the authentic TLS handshake is done.
-- If the client is sucessfully authenticated previously, shuttle server sends back a corresponding public key and a AEAD tag as a part of the Noise NNPsk0 handshake and transmutes the connection into a Noise-encrypted tunnel. Otherwise, shuttle server keeping relaying traffic dumbly between the unidentified client and the camouflage server.
-- After finishing TLS handshakes, shuttle client pulls the public key and the AEAD tag replied by the server from the connection. Till now, a ECDHE key exchange is done between shuttle client and shuttle server. Now shuttle client also transmutes the connection into a Noise-encrypted tunnel. From the point of view of an eavesdropper, the whole procedure is authentic and verifiable TLS handshakes between shuttle client and a camouflage website. 
+- On starting, shuttle client listens on localhost. When receiving a request, shuttle client fabricates a legit TLS ClientHello and sends it to shuttle server. Unlike a typical TLS handshake, the client random and session id field of the ClientHello totaling 64 bytes, which should have been randomly generated, are filled with an ephemeral X25519 public key and an AEAD tag as a part of the Noise [NNPsk0 handshake](https://noiseexplorer.com/patterns/NNpsk0/). And then it proceeds to make TLS handshakes as typical.
+- When shuttle server received a ClientHello, it tries to pull the public key and the AEAD tag from the ClientHello and authenticate them with Noise against a pre-shared key. shuttle server then forwards the ClientHello to a camouflage website and relays subsequent TLS handshake messages between shuttle client and the camouflage server until the authentic TLS handshake is done.
+- If the client is successfully authenticated previously, shuttle server sends back a corresponding public key and an AEAD tag as a part of the Noise NNPsk0 handshake and transmutes the connection into a Noise-encrypted tunnel—otherwise, shuttle server keeping relaying traffic dumbly between the unidentified client and the camouflage server.
+- After finishing TLS handshakes, shuttle client pulls the public key and the AEAD tag replied by the server from the connection. Till now, an ECDHE key exchange is done between shuttle client and shuttle server. Then shuttle client also transmutes the connection into a Noise-encrypted tunnel. From the point of view of an eavesdropper, the whole procedure is authentic and verifiable TLS handshakes between shuttle client and a camouflage website.
 
 ## Cli
 
@@ -43,7 +46,7 @@ Note that `BUILTIN_HTTP_PROXY` here is a self-explanatory reserved keyword. Othe
 
 **Client:**
 ```sh
-#                      listen_addr     remote_addr          sni       password
+# client                listen_addr     remote_addr          sni       password
 ./noisy-shuttle client 127.0.0.1:8080 server.addr.example:443 www.example.com Teap0taa
 ```
 
@@ -63,7 +66,7 @@ https://tlsfingerprint.io/id/e47eae8f8c4887b6: `--tls-ja3 769,2570-4865-4866-486
 -->
 
 ## TODO
-- [ ] connection multiplex or connection reuse
+- [ ] connection multiplex or connection reuse?
 - [ ] Embed `e, ee` into server-side CCS in TLS 1.2
 - [x] Handle TLS1.3 response from camouflage server properly
 - [ ] Elligator for public key
