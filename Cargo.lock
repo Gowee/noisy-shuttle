@@ -565,6 +565,7 @@ dependencies = [
  "futures",
  "ja3-rustls",
  "lru",
+ "rand",
  "snowy-tunnel",
  "structopt",
  "tokio",

@@ -218,7 +218,7 @@ impl AsyncWrite for SnowyStream {
         //   ref: https://github.com/tokio-rs/tls/issues/41
         //
         //   tokio::io::copy_bidirectional will poll_flush only iff poll_read is Pending, but in
-        //   such way, write might be delayed when it is possible to make progress.
+        //   such way, write might be delayed when it should have been possible to make progress.
         //   ref: https://github.com/tokio-rs/tokio/blob/42d5a9fcd4cf87fb0dd96a1850bdd2e9345a84b9/tokio/src/io/util/copy.rs#L51
         //        https://github.com/tokio-rs/tokio/pull/4001
         let mut this = self.get_mut();
