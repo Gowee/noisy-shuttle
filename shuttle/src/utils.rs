@@ -1,6 +1,7 @@
 use tokio::time::Duration;
 
-use std::fmt::{self, Display};
+use std::{fmt::{self, Display}};
+use mem::{self, MaybeUninit}
 
 pub trait DurationExt {
     fn autofmt(&'_ self) -> DurationAutoFormatter<'_>;
@@ -40,5 +41,14 @@ impl<'a> Display for DurationAutoFormatter<'a> {
                 write!(fmt, "{:.3}days", t / 3_600_000_000_000_000)
             }
         }
+    }
+}
+
+pub unsafe fn vec_uninit(len: usize) -> Vec {
+    let mut buf: Vec<MaybeUninit<u8>> =
+    Vec::with_capacity(len);
+    unsafe {
+    buf.set_len(len);
+    mem::transmute(buf)
     }
 }

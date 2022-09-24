@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use socks5_protocol as socks5;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
 use tracing::{debug, info, instrument, warn};
@@ -67,6 +68,29 @@ async fn handle_client_connection(
     client_addr: SocketAddr,
     connector: Arc<impl Connector + 'static>,
 ) -> io::Result<(u64, u64)> {
+    socks5::Version::read(&mut inbound).await.map_err(|e| e.to_io_err())?;
+    let s5req = socks5::AuthRequest::read(&mut inbound)
+        .await.map_err(|e| e.to_io_err())?;
+    socks5::Version::read(&mut inbound).await.map_err(|e| e.to_io_err())?;
+    socks5::Version::V5.write(&mut inbound).await.map_err(|e| e.to_io_err())?;
+    socks5::AuthResponse::new(s5req.select_from(&[socks5::AuthMethod::Noauth]))
+        .write(&mut inbound)
+        .await.map_err(|e| e.to_io_err())?;
+    let socks5::CommandRequest {command, address} = socks5::CommandRequest::read(&mut inbound).await.map_err(|e| e.to_io_err()).map_err(|e| e.to_io_error())?;
+    match command {
+        socks5::Command::Connect => {
+
+        },
+        socks5::Command::Bind => {
+            socks5::Version::V5.write(&mut inbound).await.map_err(|e| e.to_io_err())?;
+            socks5::CommandResponse::reply_error(socks5::CommandReply::CommandNotSupported).write(&mut inbound).await.map_err(|e| e.to_io_err())?;
+            return Ok((0, 0));
+        }
+        socks5::Command::UdpAssociate => {
+            
+        }
+    }
+    unimplemented!();
     let mut snowys = connector.connect().await.map_err(|e| {
         warn!("failed to establish snowy tunnel: {}", e);
         e

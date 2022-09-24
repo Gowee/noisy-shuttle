@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use rand::{thread_rng, Rng};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
+use tokio::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use tracing::{debug, info, instrument, trace, warn};
 
 use std::fmt::Debug;
@@ -14,8 +14,11 @@ use std::sync::Arc;
 use snowy_tunnel::{Server, SnowyStream};
 
 use crate::opt::SvrOpt;
+use crate::trojan::{call_with_addr, read_trojan_like_request};
+use crate::utils::vec_uninit;
 
 const UPSTREAM_HTTP_PROXY: &str = "BUILTIN_HTTP_PROXY";
+const MAX_DATAGRAM_SIZE: usize = 65_507;
 
 pub async fn run_server(opt: SvrOpt) -> Result<()> {
     info!(
@@ -75,46 +78,93 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
     use snowy_tunnel::AcceptError::*;
     match server.accept(inbound).await {
         Ok(mut snowys) => {
-            let (buf, outbound) = match opt.upstream.as_str() {
-                UPSTREAM_HTTP_PROXY => {
-                    let (buf, dest_addr) = upgrade_to_http_proxy_stream(&mut snowys)
+            // prefetch_read_instruction(, locality)
+            use crate::trojan::Cmd::*;
+            let req = read_trojan_like_request(&mut snowys).await?;
+            match req.cmd {
+                Connect => {
+                    let outbound = call_with_addr!(TcpStream::connect, req.addr)
                         .await
                         .map_err(|e| {
-                            warn!("failed to process HTTP request: {}", e);
+                            warn!(
+                                "failed to connect to remote when serving {}: {}",
+                                &client_addr, e
+                            );
                             e
                         })?;
-                    info!("snowy relay (proxy): {} -> {}", &client_addr, &dest_addr);
-                    (buf, TcpStream::connect(dest_addr).await)
+                    debug!(
+                        peer = &client_addr.to_string(),
+                        local_in = snowys.as_inner().local_addr().unwrap().to_string(),
+                        local_out = outbound.local_addr().unwrap().to_string(),
+                        remote = outbound.peer_addr().unwrap().to_string(),
+                        "tcp relay"
+                    );
+                    let r = tokio::io::copy_bidirectional(&mut snowys, &mut outbound).await;
+                    match r {
+                        Ok((tx, rx)) => info!(tx, rx, "relay for {} closed", &client_addr),
+                        Err(ref e) => {
+                            warn!("relay for {} terminated with error {}", &client_addr, e)
+                        }
+                    }
+                    return r;
                 }
-                upstream_addr => {
-                    info!("snowy relay: {} -> {}", &client_addr, upstream_addr);
-                    (vec![], TcpStream::connect(upstream_addr).await)
-                }
-            };
-            let mut outbound = outbound.map_err(|e| {
-                warn!(
-                    "failed to connect to remote when serving {}: {}",
-                    &client_addr, e
-                );
-                e
-            })?;
-            debug!(
-                peer = &client_addr.to_string(),
-                local_in = snowys.as_inner().local_addr().unwrap().to_string(),
-                local_out = outbound.local_addr().unwrap().to_string(),
-                remote = outbound.peer_addr().unwrap().to_string(),
-                "relay"
-            );
-            let r = async {
-                outbound.write_all(&buf).await?;
-                tokio::io::copy_bidirectional(&mut snowys, &mut outbound).await
+                UdpAssociate => {
+                    // let mut outbound = UdpSocket::bind("0.0.0.0:0");
+
+                    let outbound = call_with_addr!(UdpSocket::connect, req.addr).await?; // TODO: no connect?
+                    async {
+                        let mut buf = unsafe {vec_uninit(MAX_DATAGRAM_SIZE)};
+                        loop { 
+                            let n = outbound.recv(&mut buf).await?;
+                            snowys.write_all(&buf[..n]).await?;
+
+                            unimplemented!();
+                        }
+                    }
+                    socket.recv()
+                    unimplemented!();
+                } // Bind => return Err(io::Error::new(io::ErrorKind::Other, "Bind command not supported"))
             }
-            .await;
-            match r {
-                Ok((tx, rx)) => info!(tx, rx, "relay for {} closed", &client_addr),
-                Err(ref e) => warn!("relay for {} terminated with error {}", &client_addr, e),
-            }
-            r
+            // let (buf, outbound) = match opt.upstream.as_str() {
+            //     UPSTREAM_HTTP_PROXY => {
+            //         let (buf, dest_addr) = upgrade_to_http_proxy_stream(&mut snowys)
+            //             .await
+            //             .map_err(|e| {
+            //                 warn!("failed to process HTTP request: {}", e);
+            //                 e
+            //             })?;
+            //         info!("snowy relay (proxy): {} -> {}", &client_addr, &dest_addr);
+            //         (buf, TcpStream::connect(dest_addr).await)
+            //     }
+            //     upstream_addr => {
+            //         info!("snowy relay: {} -> {}", &client_addr, upstream_addr);
+            //         (vec![], TcpStream::connect(upstream_addr).await)
+            //     }
+            // };
+            // let mut outbound = outbound.map_err(|e| {
+            //     warn!(
+            //         "failed to connect to remote when serving {}: {}",
+            //         &client_addr, e
+            //     );
+            //     e
+            // })?;
+            // debug!(
+            //     peer = &client_addr.to_string(),
+            //     local_in = snowys.as_inner().local_addr().unwrap().to_string(),
+            //     local_out = outbound.local_addr().unwrap().to_string(),
+            //     remote = outbound.peer_addr().unwrap().to_string(),
+            //     "relay"
+            // );
+            // let r = async {
+            //     outbound.write_all(&buf).await?;
+            //     tokio::io::copy_bidirectional(&mut snowys, &mut outbound).await
+            // }
+            // .await;
+            // match r {
+            //     Ok((tx, rx)) => info!(tx, rx, "relay for {} closed", &client_addr),
+            //     Err(ref e) => warn!("relay for {} terminated with error {}", &client_addr, e),
+            // }
+            // r
         }
         Err(IoError(e)) => {
             warn!("failed to accept connection from {}: {}", &client_addr, e);
