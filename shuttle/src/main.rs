@@ -8,9 +8,9 @@ mod client;
 mod connector;
 mod opt;
 mod server;
-mod utils;
-mod trojan;
 mod socks5;
+mod trojan;
+mod utils;
 
 use crate::opt::Opt;
 

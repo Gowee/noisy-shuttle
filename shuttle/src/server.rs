@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 
 use rand::{thread_rng, Rng};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{
+    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufStream, BufWriter,
+};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use tracing::{debug, info, instrument, trace, warn};
 
@@ -9,16 +11,19 @@ use std::fmt::Debug;
 use std::io;
 use std::mem::{self, MaybeUninit};
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use snowy_tunnel::{Server, SnowyStream};
 
 use crate::opt::SvrOpt;
-use crate::trojan::{call_with_addr, read_trojan_like_request};
+use crate::trojan::{
+    call_with_addr, read_trojan_like_request, TrojanUdpDatagramReceiver, TrojanUdpDatagramSender,
+    MAX_DATAGRAM_SIZE,
+};
 use crate::utils::vec_uninit;
 
 const UPSTREAM_HTTP_PROXY: &str = "BUILTIN_HTTP_PROXY";
-const MAX_DATAGRAM_SIZE: usize = 65_507;
 
 pub async fn run_server(opt: SvrOpt) -> Result<()> {
     info!(
@@ -81,11 +86,11 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
             // prefetch_read_instruction(, locality)
             use crate::trojan::Cmd::*;
             let req = read_trojan_like_request(&mut snowys).await?;
+            dbg!(&req);
             match req.cmd {
                 Connect => {
-                    let outbound = call_with_addr!(TcpStream::connect, req.addr)
-                        .await
-                        .map_err(|e| {
+                    let mut outbound =
+                        call_with_addr!(TcpStream::connect, req.dest_addr).map_err(|e| {
                             warn!(
                                 "failed to connect to remote when serving {}: {}",
                                 &client_addr, e
@@ -109,20 +114,20 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
                     return r;
                 }
                 UdpAssociate => {
-                    // let mut outbound = UdpSocket::bind("0.0.0.0:0");
+                    // do not connect, allowing UDP punching
+                    dbg!("b");
+                    let mut outbound = dbg!(UdpSocket::bind("0.0.0.0:0").await)?;
 
-                    let outbound = call_with_addr!(UdpSocket::connect, req.addr).await?; // TODO: no connect?
-                    async {
-                        let mut buf = unsafe {vec_uninit(MAX_DATAGRAM_SIZE)};
-                        loop { 
-                            let n = outbound.recv(&mut buf).await?;
-                            snowys.write_all(&buf[..n]).await?;
-
-                            unimplemented!();
-                        }
-                    }
-                    socket.recv()
-                    unimplemented!();
+                    debug!(
+                        peer = &client_addr.to_string(),
+                        local_in = snowys.as_inner().local_addr().unwrap().to_string(),
+                        local_out = outbound.local_addr().unwrap().to_string(),
+                        remote = req.dest_addr.to_string(),
+                        "tcp relay"
+                    );
+                    relay_udp(&mut snowys, &mut outbound).await?;
+                    // TODO: log
+                    Ok((0, 0))
                 } // Bind => return Err(io::Error::new(io::ErrorKind::Other, "Bind command not supported"))
             }
             // let (buf, outbound) = match opt.upstream.as_str() {
@@ -216,6 +221,55 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
             )
         }
     }
+}
+
+/// Relay traffic between the incoming Trojan-like stream and the outbound UdpSocket
+async fn relay_udp(
+    inbound: &mut SnowyStream,
+    outbound: &mut UdpSocket,
+) -> io::Result<(usize, usize)> {
+    // let outbound = call_with_addr!(UdpSocket::connect, req.dest_addr).await?; // TODO: no connect?
+    // Every write to SnowyStream results in a standalone TLS frame, while TrojanLikeUdpDatagram
+    // may write multiple times per packet. So buffer it to avoid packet structure leakage.
+    let client_addr = inbound.as_inner().peer_addr()?;
+    let (inr, inw) = tokio::io::split(inbound);
+    let mut inr = BufReader::new(inr);
+    let mut inw = BufWriter::new(inw);
+
+    // let mut (tr, tw) = tokio::io::split(TrojanLikeUdpDatagram::new(bufferd_inbound));
+    let atob = async {
+        let mut buf = unsafe { vec_uninit(MAX_DATAGRAM_SIZE) };
+        loop {
+            let (n, remote_addr) = outbound.recv_from(&mut buf).await?;
+            // When sending udp packet from server to client, addr is the original address that the
+            // UDP socket on server received.
+            trace!(
+                len = n,
+                "receiving a UDP packet from {} to {}",
+                &remote_addr,
+                &client_addr
+            );
+            inw.send_to(&buf[..n], remote_addr.into()).await?;
+            // tx += n;
+        }
+    };
+    let btoa = async {
+        let mut buf = unsafe { vec_uninit(MAX_DATAGRAM_SIZE) };
+        loop {
+            let (n, addr) = inr.recv_from(&mut buf).await?;
+            outbound.send_to(&buf[..n], addr.to_string()).await?; // FIX: to_string
+            trace!(
+                len = n,
+                "sending a UDP packet from {} to {}",
+                &client_addr,
+                "?"
+            );
+        }
+        // Ok::<(), io::Error>
+    };
+    // TODO: when to exit on error?
+    let (rab, rba): (io::Result<()>, io::Result<()>) = tokio::join!(atob, btoa);
+    Ok((0, 0))
 }
 
 async fn upgrade_to_http_proxy_stream(snowys: &mut SnowyStream) -> io::Result<(Vec<u8>, String)> {
