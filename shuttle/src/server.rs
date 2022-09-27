@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use rand::{thread_rng, Rng};
 use tokio::io::{
-    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufStream, BufWriter,
+    AsyncReadExt, AsyncWriteExt, BufReader, BufWriter,
 };
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use tracing::{debug, info, instrument, trace, warn};
@@ -11,7 +11,7 @@ use std::fmt::Debug;
 use std::io;
 use std::mem::{self, MaybeUninit};
 use std::net::SocketAddr;
-use std::str::FromStr;
+
 use std::sync::Arc;
 
 use snowy_tunnel::{Server, SnowyStream};
@@ -111,7 +111,7 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
                             warn!("relay for {} terminated with error {}", &client_addr, e)
                         }
                     }
-                    return r;
+                    r
                 }
                 UdpAssociate => {
                     // do not connect, allowing UDP punching
@@ -250,6 +250,7 @@ async fn relay_udp(
                 &client_addr
             );
             inw.send_to(&buf[..n], remote_addr.into()).await?;
+            inw.flush().await?;
             // tx += n;
         }
     };
@@ -262,13 +263,13 @@ async fn relay_udp(
                 len = n,
                 "sending a UDP packet from {} to {}",
                 &client_addr,
-                "?"
+                &addr
             );
         }
         // Ok::<(), io::Error>
     };
     // TODO: when to exit on error?
-    let (rab, rba): (io::Result<()>, io::Result<()>) = tokio::join!(atob, btoa);
+    let (_rab, _rba): (io::Result<()>, io::Result<()>) = tokio::join!(atob, btoa);
     Ok((0, 0))
 }
 

@@ -21,4 +21,4 @@ async-trait = "0.1.57"
 rand = "0.8"
 num-traits = "0.2"
 num-derive = "0.3"
-socks5-protocol = { version = "0.3", features = [] }
+socks5-protocol = { version = "0.3", features = ["sync"] }

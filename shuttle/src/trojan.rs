@@ -36,17 +36,19 @@
 use async_trait::async_trait;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
+use socks5_protocol::sync::FromIO;
 pub use socks5_protocol::Address as Addr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::ToSocketAddrs;
 
-use std::convert::TryFrom;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 
-use snowy_tunnel::SnowyStream;
 
-pub const CRLF: u16 = 0x0d0a;
+
+use crate::utils::vec_uninit;
+
+pub const CR: u8 = 0x0d;
+pub const LF: u8 = 0x0a;
+pub const CRLF: u16 = ((CR as u16) << 8) | LF as u16;
 pub const MAX_DATAGRAM_SIZE: usize = 65_507;
 
 #[derive(Debug)]
@@ -55,7 +57,31 @@ pub struct TrojanLikeRequest {
     pub dest_addr: Addr,
 }
 
-#[derive(Debug, FromPrimitive, ToPrimitive)]
+impl TrojanLikeRequest {
+    pub fn new(cmd: Cmd, dest_addr: Addr) -> Self {
+        Self { cmd, dest_addr }
+    }
+
+    pub fn encoded(&self) -> Vec<u8> {
+        let len = 1 + self.dest_addr.serialized_len().unwrap() + 2;
+        let mut buf = unsafe { vec_uninit(len) };
+        self.encode(&mut buf);
+        buf
+    }
+
+    pub fn encode(&self, buf: &mut [u8]) -> usize {
+        let len = 1 + self.dest_addr.serialized_len().unwrap() + 2;
+        buf[0] = self.cmd.to_u8().unwrap();
+        self.dest_addr
+            .write_to(&mut io::Cursor::new(&mut buf[1..]))
+            .unwrap();
+        buf[len - 2] = CR;
+        buf[len - 1] = LF;
+        len
+    }
+}
+
+#[derive(Debug, FromPrimitive, ToPrimitive, Clone, Copy)]
 pub enum Cmd {
     Connect = 0x01,
     UdpAssociate = 0x03,
@@ -66,12 +92,12 @@ pub enum Cmd {
 //     DomainAndPort(String, u16),
 // }
 
-#[derive(FromPrimitive, ToPrimitive)]
-pub enum ATyp {
-    Ipv4Address = 0x01,
-    DomainName = 0x03,
-    IPv6Address = 0x04,
-}
+// #[derive(FromPrimitive, ToPrimitive)]
+// pub enum ATyp {
+//     Ipv4Address = 0x01,
+//     DomainName = 0x03,
+//     IPv6Address = 0x04,
+// }
 
 pub struct TrojanLikeUdpPacketHeader {
     pub dest_addr: Addr,
@@ -137,53 +163,26 @@ impl<I: AsyncRead + Unpin + Send> TrojanUdpDatagramReceiver for I {
                 "malformed trojan-like request",
             ));
         }
-        assert!(buf.len() < len); // or just discard overfill?
+        assert!(len < buf.len()); // or just discard overfill?
         self.read_exact(&mut buf[..len]).await?;
         Ok((len, addr))
     }
 }
 
-pub struct TrojanLikeUdpDatagramRecvHalf<IO: AsyncRead + Unpin>(IO);
+// pub async fn accept_trojan_like_stream(
+//     mut snowys: impl AsyncRead + AsyncWrite + Unpin,
+// ) -> io::Result<TrojanLikeRequest> {
+//     // let req = read_trojan_like_request(&mut snowys).await?;
+//     // match req.cmd {
+//     //     Cmd::Connect => {
 
-impl<IO: AsyncRead + AsyncWrite + Unpin> TrojanLikeUdpDatagramRecvHalf<IO> {
-    pub fn new(io: IO) -> Self {
-        Self(io)
-    }
+//     //     },
+//     //     Cmd::UdpAssociate => {
 
-    pub fn into_inner(self) -> IO {
-        self.0
-    }
-
-    pub async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, Addr)> {
-        let mut stream = &mut self.0;
-        let addr = Addr::read(&mut stream).await.map_err(|e| e.to_io_err())?;
-        let len = stream.read_u16().await? as usize;
-        if stream.read_u16().await? != CRLF {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "malformed trojan-like request",
-            ));
-        }
-        assert!(buf.len() < len); // or just discard overfill?
-        stream.read_exact(&mut buf[..len]).await?;
-        Ok((len, addr))
-    }
-}
-
-pub async fn accept_trojan_like_stream(
-    mut snowys: impl AsyncRead + AsyncWrite + Unpin,
-) -> io::Result<TrojanLikeRequest> {
-    // let req = read_trojan_like_request(&mut snowys).await?;
-    // match req.cmd {
-    //     Cmd::Connect => {
-
-    //     },
-    //     Cmd::UdpAssociate => {
-
-    //     }
-    // }
-    unimplemented!();
-}
+//     //     }
+//     // }
+//     unimplemented!();
+// }
 
 pub async fn read_trojan_like_request(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
