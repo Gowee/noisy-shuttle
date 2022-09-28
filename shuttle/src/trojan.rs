@@ -180,7 +180,7 @@ pub async fn read_trojan_like_request(
     let cmd = Cmd::from_u8(t).expect("TODO"); //.ok_or(|e|io::Error::new(io::ErrorKind::Other, "client request unspported command"))?;
 
     let addr = Addr::read(&mut stream).await.map_err(|e| e.to_io_err())?;
-    if dbg!(stream.read_u16().await?) != CRLF {
+    if stream.read_u16().await? != CRLF {
         return Err(io::Error::new(
             io::ErrorKind::Other,
             "malformed trojan-like request",

@@ -1,6 +1,5 @@
 use anyhow::{anyhow, ensure, Context, Result};
 
-use snowy_tunnel::SnowyStream;
 use socks5::sync::FromIO;
 use socks5_protocol as socks5;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -13,6 +12,8 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+
+use snowy_tunnel::SnowyStream;
 
 use crate::connector::{
     AdHocConnector, Connector, Preflighter, PREFLIHGTER_CONNIDLE, PREFLIHGTER_EMA_COEFF,
@@ -172,14 +173,21 @@ async fn handle_client_connection_socks5(
             }
         }
         socks5::Command::UdpAssociate => {
-            let mut inbound_udp = UdpSocket::bind("0.0.0.0:0").await?;
-            // inbound_udp.connect(address.to_string()).await?; // FIX: tostring
+            // By binding a random port to receive inbound UDP packets, shuttle client cannot be
+            // behind NAT.
+            // By not connecting (ignoring address in request), the inbound can be behind NAT.
+            //
+            // The alternative way to implement UDPAssociate is to receive inbound UDP packets on
+            // a fixed port say 0.0.0.0:1080 and maintain a queue to store NAT-like association.
             let mut bnd_addr = inbound.local_addr()?;
-            bnd_addr.set_port(inbound_udp.local_addr()?.port());
+            bnd_addr.set_port(0);
+            let mut inbound_udp = UdpSocket::bind(bnd_addr).await?;
+            bnd_addr = inbound_udp.local_addr()?;
             trace!(
-                client = client_addr.to_string(),
-                endpoint = bnd_addr.to_string(),
-                "UDP associated"
+                client_tcp = client_addr.to_string(),
+                local_in_tcp = inbound_udp.local_addr()?.to_string(),
+                local_in_udp = bnd_addr.to_string(),
+                "UDP bound"
             );
             let mut buffered_inbound = BufWriter::new(&mut inbound);
             socks5::CommandResponse::success(bnd_addr.into())
@@ -294,8 +302,6 @@ async fn handle_client_connection_http(
                         dest = dest_addr.to_string(),
                         "relay tcp"
                     );
-                    // buf.drain(end..);
-                    // buf.drain(..start);
                     let header = TrojanLikeRequest::new(Cmd::Connect, dest_addr);
                     let mut outbuf = unsafe { vec_uninit(MAX_FIRST_PACKET_SIZE) };
                     let n = header.encode(&mut outbuf);
@@ -424,20 +430,26 @@ async fn relay_udp_with(
     outbound: &mut SnowyStream,
     header: TrojanLikeRequest,
 ) -> io::Result<(u64, u64)> {
-    let _remote_addr = outbound.as_inner().peer_addr()?;
     let (outr, outw) = tokio::io::split(outbound);
     let mut outr = BufReader::new(outr);
     let mut outw = BufWriter::new(outw);
+    // Send trojan request header along with the first packet.
+    // NOTE: this effectively limit the max size of the first packet to be MAX_DATAGRAM_SIZE -
+    // outbuf.len()
     header.write(&mut outw).await?;
     let atob = async {
         let mut buf = unsafe { vec_uninit(MAX_DATAGRAM_SIZE) };
         loop {
-            // Send trojan request header along with the first packet.
-            // NOTE: this effectively limit the max size of the first packet to be
-            //   MAX_DATAGRAM_SIZE - outbuf.len()
             let (n, client_addr) = inbound.recv_from(&mut buf).await?;
             if inbound.peer_addr().is_err() {
-                dbg!(&client_addr);
+                // associate the addr per the first packet, since the inbound may be behind NAT
+                trace!(
+                    client_tcp = inbound_tcp.peer_addr()?.to_string(),
+                    local_in_tcp = inbound_tcp.local_addr()?.to_string(),
+                    client_udp = inbound.peer_addr()?.to_string(),
+                    local_in_udp = inbound.local_addr()?.to_string(),
+                    "UDP associated"
+                );
                 inbound.connect(&client_addr).await?;
             }
             if buf[2] != 0 {
@@ -456,7 +468,7 @@ async fn relay_udp_with(
                 &client_addr,
                 &dest_addr
             );
-            dbg!(outw.send_to(&buf[3 + addrlen..n], dest_addr).await)?;
+            outw.send_to(&buf[3 + addrlen..n], dest_addr).await?;
             outw.flush().await?;
             // tx += n;
         }
@@ -477,11 +489,10 @@ async fn relay_udp_with(
             orig_addr
                 .write_to(&mut Cursor::new(&mut buf[3..3 + addrlen]))
                 .unwrap();
-            dbg!(inbound.send(&buf[..n + addrlen]).await)?; // FIX: to_string
+            inbound.send(&buf[..n + addrlen]).await?;
         }
     };
 
     let (_rab, _rba): (io::Result<()>, io::Result<()>) = tokio::join!(atob, btoa);
-    dbg!(inbound_tcp);
     Ok((0, 0)) // FIX: cnt
 }

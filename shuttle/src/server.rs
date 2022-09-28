@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 
+use lru::LruCache;
 use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use tokio::net::{lookup_host, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use tracing::{debug, info, instrument, trace, warn};
 
 use std::fmt::Debug;
@@ -13,10 +14,12 @@ use snowy_tunnel::{Server, SnowyStream};
 
 use crate::opt::SvrOpt;
 use crate::trojan::{
-    call_with_addr, read_trojan_like_request, TrojanUdpDatagramReceiver, TrojanUdpDatagramSender,
-    MAX_DATAGRAM_SIZE,
+    call_with_addr, read_trojan_like_request, Addr, TrojanUdpDatagramReceiver,
+    TrojanUdpDatagramSender, MAX_DATAGRAM_SIZE,
 };
 use crate::utils::vec_uninit;
+
+const MAX_CACHED_DOMAIN_ADDRS_PER_SOCKET: usize = 64;
 
 pub async fn run_server(opt: SvrOpt) -> Result<()> {
     info!("server is up with camouflage: {}", &opt.camouflage_addr);
@@ -104,8 +107,7 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
                 }
                 UdpAssociate => {
                     // do not connect, allowing UDP punching
-                    let mut outbound = dbg!(UdpSocket::bind("0.0.0.0:0").await)?;
-
+                    let mut outbound = UdpSocket::bind("0.0.0.0:0").await?;
                     debug!(
                         peer = &client_addr.to_string(),
                         local_in = snowys.as_inner().local_addr().unwrap().to_string(),
@@ -171,20 +173,54 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
     }
 }
 
-/// Relay traffic between the incoming Trojan-like stream and the outbound UdpSocket
+/// Relay traffic between the incoming stream and the outbound UdpSocket
 async fn relay_udp(
     inbound: &mut SnowyStream,
     outbound: &mut UdpSocket,
 ) -> io::Result<(usize, usize)> {
-    // let outbound = call_with_addr!(UdpSocket::connect, req.dest_addr).await?; // TODO: no connect?
     let client_addr = inbound.as_inner().peer_addr()?;
     // SnowyStream buffers read internally but not write.
     // Every write to SnowyStream results in a standalone TLS frame, while TrojanLikeUdpDatagram
     // may write multiple times per packet. So buffer it to avoid packet structure leakage.
     let (mut inr, inw) = tokio::io::split(inbound);
     let mut inw = BufWriter::new(inw);
-
+    // TODO: serious global resolver
+    let mut resolved_addrs: LruCache<(String, u16), SocketAddr> =
+        LruCache::new(MAX_CACHED_DOMAIN_ADDRS_PER_SOCKET);
     let atob = async {
+        let mut buf = unsafe { vec_uninit(MAX_DATAGRAM_SIZE) };
+        loop {
+            let (n, addr) = inr.recv_from(&mut buf).await?;
+            trace!(
+                len = n,
+                "sending a UDP packet from {} to {}",
+                &client_addr,
+                &addr
+            );
+            match addr {
+                Addr::SocketAddr(ref sa) => outbound.send_to(&buf[..n], sa).await?,
+                Addr::Domain(h, p) => {
+                    let hp = (h, p);
+                    let sa = match resolved_addrs.get(&hp) {
+                        Some(sa) => sa,
+                        None => {
+                            let sa = lookup_host(&hp).await?.next().ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    "no addresses to send data to",
+                                )
+                            })?;
+                            resolved_addrs.put(hp, sa);
+                            resolved_addrs.iter().next().unwrap().1
+                        }
+                    };
+                    outbound.send_to(&buf[..n], sa).await?
+                }
+            };
+        }
+        // Ok::<(), io::Error>
+    };
+    let btoa = async {
         let mut buf = unsafe { vec_uninit(MAX_DATAGRAM_SIZE) };
         loop {
             let (n, remote_addr) = outbound.recv_from(&mut buf).await?;
@@ -200,20 +236,6 @@ async fn relay_udp(
             inw.flush().await?;
             // tx += n;
         }
-    };
-    let btoa = async {
-        let mut buf = unsafe { vec_uninit(MAX_DATAGRAM_SIZE) };
-        loop {
-            let (n, addr) = inr.recv_from(&mut buf).await?;
-            outbound.send_to(&buf[..n], addr.to_string()).await?; // FIX: to_string
-            trace!(
-                len = n,
-                "sending a UDP packet from {} to {}",
-                &client_addr,
-                &addr
-            );
-        }
-        // Ok::<(), io::Error>
     };
     // TODO: when to exit on error?
     let (_rab, _rba): (io::Result<()>, io::Result<()>) = tokio::join!(atob, btoa);
