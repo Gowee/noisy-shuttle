@@ -8,7 +8,6 @@ mod client;
 mod connector;
 mod opt;
 mod server;
-mod socks5;
 mod trojan;
 mod utils;
 

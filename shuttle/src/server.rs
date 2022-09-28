@@ -1,17 +1,12 @@
 use anyhow::{Context, Result};
 
-use rand::{thread_rng, Rng};
-use tokio::io::{
-    AsyncReadExt, AsyncWriteExt, BufReader, BufWriter,
-};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use tracing::{debug, info, instrument, trace, warn};
 
 use std::fmt::Debug;
 use std::io;
-use std::mem::{self, MaybeUninit};
 use std::net::SocketAddr;
-
 use std::sync::Arc;
 
 use snowy_tunnel::{Server, SnowyStream};
@@ -22,8 +17,6 @@ use crate::trojan::{
     MAX_DATAGRAM_SIZE,
 };
 use crate::utils::vec_uninit;
-
-const UPSTREAM_HTTP_PROXY: &str = "BUILTIN_HTTP_PROXY";
 
 pub async fn run_server(opt: SvrOpt) -> Result<()> {
     info!(
@@ -83,10 +76,9 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
     use snowy_tunnel::AcceptError::*;
     match server.accept(inbound).await {
         Ok(mut snowys) => {
-            // prefetch_read_instruction(, locality)
             use crate::trojan::Cmd::*;
             let req = read_trojan_like_request(&mut snowys).await?;
-            dbg!(&req);
+            trace!("trojan like request from {}: {:?}", &client_addr, &req);
             match req.cmd {
                 Connect => {
                     let mut outbound =
@@ -115,7 +107,6 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
                 }
                 UdpAssociate => {
                     // do not connect, allowing UDP punching
-                    dbg!("b");
                     let mut outbound = dbg!(UdpSocket::bind("0.0.0.0:0").await)?;
 
                     debug!(
@@ -130,46 +121,6 @@ pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
                     Ok((0, 0))
                 } // Bind => return Err(io::Error::new(io::ErrorKind::Other, "Bind command not supported"))
             }
-            // let (buf, outbound) = match opt.upstream.as_str() {
-            //     UPSTREAM_HTTP_PROXY => {
-            //         let (buf, dest_addr) = upgrade_to_http_proxy_stream(&mut snowys)
-            //             .await
-            //             .map_err(|e| {
-            //                 warn!("failed to process HTTP request: {}", e);
-            //                 e
-            //             })?;
-            //         info!("snowy relay (proxy): {} -> {}", &client_addr, &dest_addr);
-            //         (buf, TcpStream::connect(dest_addr).await)
-            //     }
-            //     upstream_addr => {
-            //         info!("snowy relay: {} -> {}", &client_addr, upstream_addr);
-            //         (vec![], TcpStream::connect(upstream_addr).await)
-            //     }
-            // };
-            // let mut outbound = outbound.map_err(|e| {
-            //     warn!(
-            //         "failed to connect to remote when serving {}: {}",
-            //         &client_addr, e
-            //     );
-            //     e
-            // })?;
-            // debug!(
-            //     peer = &client_addr.to_string(),
-            //     local_in = snowys.as_inner().local_addr().unwrap().to_string(),
-            //     local_out = outbound.local_addr().unwrap().to_string(),
-            //     remote = outbound.peer_addr().unwrap().to_string(),
-            //     "relay"
-            // );
-            // let r = async {
-            //     outbound.write_all(&buf).await?;
-            //     tokio::io::copy_bidirectional(&mut snowys, &mut outbound).await
-            // }
-            // .await;
-            // match r {
-            //     Ok((tx, rx)) => info!(tx, rx, "relay for {} closed", &client_addr),
-            //     Err(ref e) => warn!("relay for {} terminated with error {}", &client_addr, e),
-            // }
-            // r
         }
         Err(IoError(e)) => {
             warn!("failed to accept connection from {}: {}", &client_addr, e);
@@ -229,14 +180,13 @@ async fn relay_udp(
     outbound: &mut UdpSocket,
 ) -> io::Result<(usize, usize)> {
     // let outbound = call_with_addr!(UdpSocket::connect, req.dest_addr).await?; // TODO: no connect?
+    let client_addr = inbound.as_inner().peer_addr()?;
+    // SnowyStream buffers read internally but not write.
     // Every write to SnowyStream results in a standalone TLS frame, while TrojanLikeUdpDatagram
     // may write multiple times per packet. So buffer it to avoid packet structure leakage.
-    let client_addr = inbound.as_inner().peer_addr()?;
-    let (inr, inw) = tokio::io::split(inbound);
-    let mut inr = BufReader::new(inr);
+    let (mut inr, inw) = tokio::io::split(inbound);
     let mut inw = BufWriter::new(inw);
 
-    // let mut (tr, tw) = tokio::io::split(TrojanLikeUdpDatagram::new(bufferd_inbound));
     let atob = async {
         let mut buf = unsafe { vec_uninit(MAX_DATAGRAM_SIZE) };
         loop {
@@ -271,106 +221,4 @@ async fn relay_udp(
     // TODO: when to exit on error?
     let (_rab, _rba): (io::Result<()>, io::Result<()>) = tokio::join!(atob, btoa);
     Ok((0, 0))
-}
-
-async fn upgrade_to_http_proxy_stream(snowys: &mut SnowyStream) -> io::Result<(Vec<u8>, String)> {
-    // TODO: this is a over-simplified dirty implementation, a robust one is needed
-    const HTTP_200_CONNECTION_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\nX-Padding: X-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-PaddingX-Padding ";
-    let mut buf = unsafe { String::from_utf8_unchecked(vec![0u8; 4096]) };
-    let mut start = 0;
-    let mut end = 0;
-    loop {
-        let n = snowys
-            .read(&mut (unsafe { buf.as_bytes_mut() })[start..])
-            .await?;
-        end += n;
-        if let Some(i) = (&buf[start..]).find("\r\n\r\n") {
-            start = i + 4;
-            break;
-        }
-        if n == 0 {
-            debug!("received: {}", &buf[..end]);
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "client http request incomplete",
-            ));
-        }
-        if end == buf.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "client http request header invalid",
-            ));
-        }
-    }
-    let reqtriple = (&buf[..start])
-        .find("\r\n")
-        .and_then(|i| std::str::from_utf8(buf[..i].as_bytes()).ok())
-        .map(|startline| {
-            let mut startline = startline.split(' ');
-            (startline.next(), startline.next(), startline.next())
-        });
-    match reqtriple {
-        Some((Some("CONNECT"), Some(dest), Some(httpver))) => {
-            trace!(
-                "http proxy received CONNECT from {:?}, url: {}, version: {}",
-                snowys,
-                dest,
-                httpver
-            );
-            let dest = dest.to_owned();
-            let mut buf = buf.into_bytes();
-            buf.drain(end..);
-            buf.drain(..start);
-            let n = thread_rng().gen_range(200..HTTP_200_CONNECTION_ESTABLISHED.len());
-            let mut response: Vec<MaybeUninit<u8>> = Vec::with_capacity(n + 4);
-            let mut response: Vec<u8> = unsafe {
-                response.set_len(response.capacity());
-                mem::transmute(response)
-            };
-            response[..n].copy_from_slice(&HTTP_200_CONNECTION_ESTABLISHED[..n]);
-            response[n..].copy_from_slice(b"\r\n\r\n");
-            snowys.write_all(&response).await?;
-            snowys.flush().await?;
-            Ok((buf, dest))
-        }
-        Some((Some(method), Some(url), Some(httpver @ ("HTTP/0.9" | "HTTP/1.0" | "HTTP/1.1")))) => {
-            trace!(
-                "http proxy received request {} from {:?}, url: {}, version: {}",
-                method,
-                snowys.as_inner(),
-                url,
-                httpver
-            );
-            let dest = extract_host_addr_from_url(url).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("failed to parse url: {}", url),
-                )
-            })?;
-            let mut buf = buf.into_bytes();
-            buf.drain(end..);
-            snowys.flush().await?;
-            Ok((buf, dest))
-        }
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Request invalid or method not supported",
-        )),
-    }
-}
-
-fn extract_host_addr_from_url(url: &str) -> Option<String> {
-    let mut components = url.split("//");
-    let scheme = components.next()?;
-    let host = components.next().and_then(|url| url.split('/').next())?;
-    let port = match &scheme[..scheme.len() - 1] {
-        "ftp" => 21,
-        "https" => 443,
-        "http" | "" => 80,
-        _ => return None,
-    };
-    Some(match host.find(':').is_some() {
-        true => host.to_owned(),
-        false => format!("{}:{}", host, port),
-    })
 }

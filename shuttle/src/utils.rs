@@ -46,8 +46,6 @@ impl<'a> Display for DurationAutoFormatter<'a> {
 
 pub unsafe fn vec_uninit<T>(len: usize) -> Vec<T> {
     let mut buf: Vec<MaybeUninit<u8>> = Vec::with_capacity(len);
-    unsafe {
-        buf.set_len(len);
-        mem::transmute(buf)
-    }
+    buf.set_len(len);
+    mem::transmute(buf)
 }

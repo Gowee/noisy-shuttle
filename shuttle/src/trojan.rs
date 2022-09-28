@@ -42,8 +42,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use std::io;
 
-
-
 use crate::utils::vec_uninit;
 
 pub const CR: u8 = 0x0d;
@@ -79,6 +77,17 @@ impl TrojanLikeRequest {
         buf[len - 1] = LF;
         len
     }
+
+    pub async fn write(&self, mut w: impl AsyncWrite + Unpin) -> io::Result<usize> {
+        let len = 1 + self.dest_addr.serialized_len().unwrap() + 2;
+        w.write_u8(self.cmd.to_u8().unwrap()).await?;
+        self.dest_addr
+            .write(&mut w)
+            .await
+            .map_err(|e| e.to_io_err())?;
+        w.write_u16(CRLF).await?;
+        Ok(len)
+    }
 }
 
 #[derive(Debug, FromPrimitive, ToPrimitive, Clone, Copy)]
@@ -98,11 +107,6 @@ pub enum Cmd {
 //     DomainName = 0x03,
 //     IPv6Address = 0x04,
 // }
-
-pub struct TrojanLikeUdpPacketHeader {
-    pub dest_addr: Addr,
-    pub length: u16,
-}
 
 // impl Addr {
 //     async fn read(stream: impl AsyncRead + Unpin) -> io::Result<Self> {
@@ -169,35 +173,13 @@ impl<I: AsyncRead + Unpin + Send> TrojanUdpDatagramReceiver for I {
     }
 }
 
-// pub async fn accept_trojan_like_stream(
-//     mut snowys: impl AsyncRead + AsyncWrite + Unpin,
-// ) -> io::Result<TrojanLikeRequest> {
-//     // let req = read_trojan_like_request(&mut snowys).await?;
-//     // match req.cmd {
-//     //     Cmd::Connect => {
-
-//     //     },
-//     //     Cmd::UdpAssociate => {
-
-//     //     }
-//     // }
-//     unimplemented!();
-// }
-
 pub async fn read_trojan_like_request(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> io::Result<TrojanLikeRequest> {
-    // macro_rules! parse_port {
-    //     ($double_u8_slice: expr) => {
-    //         unsafe { u16::from_be_bytes(<[u8; 2]>::try_from($double_u8_slice).unwrap_unchecked()) }
-    //     };
-    // }
     let t = stream.read_u8().await?;
-    dbg!(t);
     let cmd = Cmd::from_u8(t).expect("TODO"); //.ok_or(|e|io::Error::new(io::ErrorKind::Other, "client request unspported command"))?;
 
     let addr = Addr::read(&mut stream).await.map_err(|e| e.to_io_err())?;
-    dbg!(&addr);
     if dbg!(stream.read_u16().await?) != CRLF {
         return Err(io::Error::new(
             io::ErrorKind::Other,
