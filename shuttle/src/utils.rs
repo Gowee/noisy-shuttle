@@ -49,3 +49,29 @@ pub unsafe fn vec_uninit<T>(len: usize) -> Vec<T> {
     buf.set_len(len);
     mem::transmute(buf)
 }
+
+pub fn extract_host_addr_from_url(url: &str) -> Option<(&str, u16)> {
+    let mut components = url.split("//");
+    let scheme = components.next()?;
+    let host = components.next().and_then(|url| url.split('/').next())?;
+    let port = match &scheme[..scheme.len() - 1] {
+        "ftp" => 21,
+        "https" => 443,
+        "http" | "" => 80,
+        _ => return None,
+    };
+    Some(match host.find(':') {
+        Some(i) => {
+            let (h, p) = host.split_at(i);
+            (h, p.parse().ok()?)
+        }
+        None => (host, port),
+    })
+}
+
+pub fn url_to_relative(mut url: &str) -> Option<&str> {
+    if let Some(i) = url.find("//") {
+        url = &url[i + 2..];
+    }
+    url.find('/').map(|i| &url[i..])
+}

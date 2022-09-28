@@ -34,7 +34,7 @@ pub struct CltOpt {
     #[structopt(name = "SERVER_NAME")]
     pub server_name: String,
 
-    /// The key to encrypt all traffic
+    /// Key to encrypt all traffic
     #[structopt(name = "KEY")]
     pub key: String,
 
@@ -58,7 +58,7 @@ pub struct CltOpt {
     #[structopt(long = "tls-versions", name = "supported versions", parse(try_from_str = parse_u16_array))]
     pub tls_versions: Option<Array<u16>>,
 
-    // Key Share curves to apply to ClientHello, seperated by comma (only X25519 and GREASE are allowed so far)
+    /// Key Share curves to apply to ClientHello, seperated by comma (only X25519 and GREASE are allowed so far)
     #[structopt(long = "tls-keyshare", name = "keyshare", parse(try_from_str = parse_u16_array))]
     pub tls_keyshare: Option<Array<u16>>,
 }
@@ -69,15 +69,11 @@ pub struct SvrOpt {
     #[structopt(name = "LISTEN_ADDR")]
     pub listen_addr: SocketAddr,
 
-    /// Upstream HOST:PORT address to proxy or "BUILTIN_HTTP_PROXY"
-    #[structopt(name = "UPSTREAM")]
-    pub upstream: String,
-
     /// Camouflage HOST:PORT address to connect to for replicating TLS handshaking
     #[structopt(name = "CAMOUFLAGE_ADDR")]
     pub camouflage_addr: String,
 
-    /// The key to encrypt all traffic
+    /// Key to encrypt all traffic
     #[structopt(name = "KEY")]
     pub key: String,
 

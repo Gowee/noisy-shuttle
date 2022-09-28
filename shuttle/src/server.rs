@@ -19,10 +19,7 @@ use crate::trojan::{
 use crate::utils::vec_uninit;
 
 pub async fn run_server(opt: SvrOpt) -> Result<()> {
-    info!(
-        "server is up with remote: {}, camouflage: {}",
-        opt.upstream, &opt.camouflage_addr
-    );
+    info!("server is up with camouflage: {}", &opt.camouflage_addr);
     let server = Arc::new(opt.build_server());
     let opt = Arc::new(opt);
     let listener = TcpListener::bind(opt.listen_addr)

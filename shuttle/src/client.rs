@@ -5,13 +5,14 @@ use socks5::sync::FromIO;
 use socks5_protocol as socks5;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::time::Instant;
+use tokio::time::{timeout, Instant};
 use tracing::{debug, info, instrument, trace, warn};
 
 use std::io::{self, Cursor, Write};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::connector::{
     AdHocConnector, Connector, Preflighter, PREFLIHGTER_CONNIDLE, PREFLIHGTER_EMA_COEFF,
@@ -21,9 +22,14 @@ use crate::trojan::{
     self, Cmd, TrojanLikeRequest, TrojanUdpDatagramReceiver, TrojanUdpDatagramSender,
     MAX_DATAGRAM_SIZE,
 };
-use crate::utils::{vec_uninit, DurationExt};
+use crate::utils::{extract_host_addr_from_url, url_to_relative, vec_uninit, DurationExt};
 
+/// Maximum size of the initial data from inbound TCP socket which would be sent together with
+/// request header
 const MAX_FIRST_PACKET_SIZE: usize = 8192;
+/// Time to wait for the initial data from inbound TCP socket which would be sent together with
+/// request header
+const FIRST_PACKET_TIMEOUT: Duration = Duration::from_millis(20);
 
 pub async fn run_client(opt: CltOpt) -> Result<()> {
     info!(
@@ -136,11 +142,6 @@ async fn handle_client_connection_socks5(
                 dest = req.address.to_string(),
                 "relay tcp"
             );
-            // Try to send the Trojan-like header along with the first inbound packet to avoid
-            // fixed TLS frame size.
-            //   ref: https://github.com/trojan-gfw/trojan/blob/304054008bb01d6aad51c477b6b7d4e79a5853db/src/session/clientsession.cpp#L194
-            // (WON'T?) FIX: This assumes client always send before reading data after a TCP
-            //   connection is established. Compatility problem might reside here.
             let now = Instant::now();
             match relay_tcp_with(
                 &mut inbound,
@@ -279,13 +280,11 @@ async fn handle_client_connection_http(
                     let dest_addr = trojan::Addr::from_str(url)
                         .ok()
                         .context("invalid address")?;
+                    inbound.write_all(HTTP_200_CONNECTION_ESTABLISHED).await?;
                     let mut snowys = connector
                         .connect()
                         .await
                         .context("failed to establish snowy tunnel")?;
-
-                    inbound.write_all(HTTP_200_CONNECTION_ESTABLISHED).await?;
-
                     debug!(
                         via = "http CONNECT proxy",
                         client = client_addr.to_string(),
@@ -304,8 +303,8 @@ async fn handle_client_connection_http(
                     outbuf.extend_from_slice(&buf[start..end]);
                     return relay_tcp_with(&mut inbound, &mut snowys, Some(outbuf)).await;
                 }
-                method @ ("GET" | "POST" | "OPTIONS" | "HEAD" | "PUT" | "DELETE" | "OPTIONS"
-                | "TRACE" | "PATCH") => {
+                method @ ("GET" | "POST" | "OPTIONS" | "HEAD" | "PUT" | "DELETE" | "TRACE"
+                | "PATCH") => {
                     if url.starts_with('/') {
                         // not proxied request
                         inbound.write_all(HTTP_400_BAD_REQUEST).await?;
@@ -315,7 +314,7 @@ async fn handle_client_connection_http(
                             host.unwrap_or("<EMPTY>")
                         ));
                     }
-                    let dest_addr = extract_host_addr(url)
+                    let dest_addr = extract_host_addr_from_url(url)
                         .and_then(|a| {
                             if a.0.len() < 256 {
                                 Some(trojan::Addr::Domain(a.0.to_owned(), a.1))
@@ -378,47 +377,36 @@ async fn handle_client_connection_http(
     }
 }
 
-fn extract_host_addr(url: &str) -> Option<(&str, u16)> {
-    let mut components = url.split("//");
-    let scheme = components.next()?;
-    let host = components.next().and_then(|url| url.split('/').next())?;
-    let port = match &scheme[..scheme.len() - 1] {
-        "ftp" => 21,
-        "https" => 443,
-        "http" | "" => 80,
-        _ => return None,
-    };
-    Some(match host.find(':') {
-        Some(i) => {
-            let (h, p) = host.split_at(i);
-            (h, p.parse().ok()?)
-        }
-        None => (host, port),
-    })
-}
-
-fn url_to_relative(mut url: &str) -> Option<&str> {
-    if let Some(i) = url.find("//") {
-        url = &url[i + 2..];
-    }
-    url.find('/').map(|i| &url[i..])
-}
-
+// TODO: bullshit API design
 #[instrument]
 async fn relay_tcp_with(
     mut inbound: &mut TcpStream,
     mut outbound: &mut SnowyStream,
     outbuf: Option<Vec<u8>>,
 ) -> Result<(u64, u64)> {
-    // TODO: bullshit API design
+    // Ref: https://github.com/trojan-gfw/trojan/blob/304054008bb01d6aad51c477b6b7d4e79a5853db/src/session/clientsession.cpp#L194
+    // Try to send the request header in outbuf, if any, along with the first inbound packet to
+    // prevent traffic from being distinguished by TLS frame size.
+    // This assumes client typically send before reading data after a connection is established.
+    // Set a timeout in case client expects receiving at first.
     if let Some(mut outbuf) = outbuf {
         let mut offset = outbuf.len();
         outbuf.reserve_exact(MAX_FIRST_PACKET_SIZE - outbuf.len());
         unsafe { outbuf.set_len(MAX_FIRST_PACKET_SIZE) };
-        offset += inbound
-            .read(&mut outbuf[offset..])
-            .await
-            .context("failed to read initial inbound data")?;
+        let t = Instant::now();
+        match timeout(FIRST_PACKET_TIMEOUT, inbound.read(&mut outbuf[offset..])).await {
+            Ok(r) => {
+                let n = r.context("failed to read initial inbound data")?;
+                trace!(
+                    "received initial data of {}B from {:?} after {}",
+                    n,
+                    &inbound,
+                    t.elapsed().autofmt()
+                );
+                offset += n;
+            }
+            _ => trace!("initial data waiting timeout, for {:?}", &inbound),
+        }
         outbound
             .write_all(&outbuf[..offset])
             .await
@@ -444,7 +432,7 @@ async fn relay_udp_with(
     let atob = async {
         let mut buf = unsafe { vec_uninit(MAX_DATAGRAM_SIZE) };
         loop {
-            // send trojan request header along with the first packet
+            // Send trojan request header along with the first packet.
             // NOTE: this effectively limit the max size of the first packet to be
             //   MAX_DATAGRAM_SIZE - outbuf.len()
             let (n, client_addr) = inbound.recv_from(&mut buf).await?;
@@ -460,8 +448,8 @@ async fn relay_udp_with(
                 .map_err(|e| e.to_io_err())?;
             let addrlen = dest_addr.serialized_len().unwrap();
 
-            // when sending udp packet from server to client, addr is the original address that the
-            // UDP socket on server received
+            // When sending udp packet from server to client, addr is the original address that the
+            // UDP socket on server received.
             trace!(
                 len = n,
                 "sending a UDP packet from {} to {}",
