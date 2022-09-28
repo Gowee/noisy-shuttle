@@ -143,7 +143,10 @@ pub trait TrojanUdpDatagramSender {
 
 #[async_trait]
 pub trait TrojanUdpDatagramReceiver {
-    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, Addr)>;
+    ///
+    ///
+    ///  `None` indicates EoF (connection closed).
+    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<Option<(usize, Addr)>>;
 }
 
 #[async_trait]
@@ -158,8 +161,15 @@ impl<O: AsyncWrite + Unpin + Send> TrojanUdpDatagramSender for O {
 
 #[async_trait]
 impl<I: AsyncRead + Unpin + Send> TrojanUdpDatagramReceiver for I {
-    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, Addr)> {
-        let addr = Addr::read(&mut self).await.map_err(|e| e.to_io_err())?;
+    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<Option<(usize, Addr)>> {
+        let addr = match Addr::read(&mut self).await.map_err(|e| e.to_io_err()) {
+            Ok(addr) => addr,
+            Err(e) => match e.kind() {
+                // connection closed, no more packets
+                io::ErrorKind::UnexpectedEof => return Ok(None),
+                _ => return Err(e),
+            },
+        };
         let len = self.read_u16().await? as usize;
         if self.read_u16().await? != CRLF {
             return Err(io::Error::new(
@@ -169,7 +179,7 @@ impl<I: AsyncRead + Unpin + Send> TrojanUdpDatagramReceiver for I {
         }
         assert!(len < buf.len()); // or just discard overfill?
         self.read_exact(&mut buf[..len]).await?;
-        Ok((len, addr))
+        Ok(Some((len, addr)))
     }
 }
 

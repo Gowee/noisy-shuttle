@@ -47,7 +47,7 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     let client = opt.build_client();
     if !client.fingerprint_spec.is_empty() {
         info!("tls fingerprint loaded");
-        debug!("{:?}", client.fingerprint_spec);
+        debug!(fpspec = ?client.fingerprint_spec);
     }
 
     match opt.preflight {
@@ -74,39 +74,43 @@ async fn serve(
 
     while let Ok((inbound, client_addr)) = listener.accept().await {
         // TODO: handle error
-        info!("accepting connection from {}", &client_addr);
+        debug!("accepting connection from {}", &client_addr);
         let connector = connector.clone();
+        // convention: handle_connection only returns error in early/handshake phases
         tokio::spawn(async move {
-            match handle_client_connection(inbound, client_addr, connector).await {
-                Ok(_) => {}
-                Err(e) => warn!("error when serving {}: {:#}", &client_addr, e),
+            if let Err(e) = handle_connection(inbound, client_addr, connector).await {
+                warn!(error = %format!("{:#}", e), "failed to serve {}", &client_addr)
             }
         });
     }
     Ok(())
 }
 
-#[instrument(skip(connector))]
-async fn handle_client_connection(
+// #[instrument(skip(connector), level = "trace")]
+async fn handle_connection(
     inbound: TcpStream,
     client_addr: SocketAddr,
     connector: Arc<impl Connector + 'static>,
-) -> Result<(u64, u64)> {
+) -> Result<()> {
     let mut first = [0u8];
     inbound.peek(&mut first).await?;
 
     match first[0] {
-        0x04 | 0x05 => handle_client_connection_socks5(inbound, client_addr, connector).await,
-        _ => handle_client_connection_http(inbound, client_addr, connector).await,
+        0x04 | 0x05 => handle_connection_socks5(inbound, client_addr, connector).await,
+        _ => handle_connection_http(inbound, client_addr, connector).await,
     }
 }
 
+#[instrument(name = "socks5_proxy", skip(inbound, client_addr, connector), fields(
+    %client = client_addr,
+    // %local_in = inbound.local_addr().unwrap(),
+))]
 #[inline(always)]
-async fn handle_client_connection_socks5(
+async fn handle_connection_socks5(
     mut inbound: TcpStream,
     client_addr: SocketAddr,
     connector: Arc<impl Connector + 'static>,
-) -> Result<(u64, u64)> {
+) -> Result<()> {
     const SOCKS5_CONNECT_SUCCEEDED: &[u8] =
         &[0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     const SOCKS5_COMMAND_NOT_SUPPORTED: &[u8] = &[0x05, 0x07, 0x00];
@@ -118,11 +122,10 @@ async fn handle_client_connection_socks5(
         .await?;
     // CommandRequest includes VER
     let req = socks5::CommandRequest::read(&mut inbound).await?;
-    trace!(
-        "received socks5 command request from {}, command: {:?}, address: {}",
-        &client_addr,
-        req.command,
-        req.address
+    info!(
+        command = ?req.command,
+        dest_addr = req.address.to_string(),
+        "accepting request"
     );
     match req.command {
         socks5::Command::Connect => {
@@ -135,42 +138,9 @@ async fn handle_client_connection_socks5(
                 .connect()
                 .await
                 .context("failed to establish snowy tunnel")?;
-            debug!(
-                client = client_addr.to_string(),
-                local_in = inbound.local_addr().unwrap().to_string(),
-                local_out = snowys.as_inner().local_addr().unwrap().to_string(),
-                remote = snowys.as_inner().peer_addr().unwrap().to_string(),
-                dest = req.address.to_string(),
-                "relay tcp"
-            );
-            let now = Instant::now();
-            match relay_tcp_with(
-                &mut inbound,
-                &mut snowys,
-                Some(TrojanLikeRequest::new(Cmd::Connect, req.address).encoded()),
-            )
-            .await
-            {
-                Ok((a, b)) => {
-                    info!(
-                        rx = a,
-                        tx = b,
-                        "relay for {} closed after {}",
-                        &client_addr,
-                        now.elapsed().autofmt(),
-                    );
-                    Ok((a, b))
-                }
-                Err(e) => {
-                    warn!(
-                        "relay for {} terminated after {} with error: {}",
-                        &client_addr,
-                        now.elapsed().autofmt(),
-                        e,
-                    );
-                    Err(e)
-                }
-            }
+            let outbuf = Some(TrojanLikeRequest::new(Cmd::Connect, req.address).encoded());
+            log_relay!(relay_tcp_with(&mut inbound, &mut snowys, outbuf));
+            Ok(())
         }
         socks5::Command::UdpAssociate => {
             // By binding a random port to receive inbound UDP packets, shuttle client cannot be
@@ -183,12 +153,7 @@ async fn handle_client_connection_socks5(
             bnd_addr.set_port(0);
             let mut inbound_udp = UdpSocket::bind(bnd_addr).await?;
             bnd_addr = inbound_udp.local_addr()?;
-            trace!(
-                client_tcp = client_addr.to_string(),
-                local_in_tcp = inbound_udp.local_addr()?.to_string(),
-                local_in_udp = bnd_addr.to_string(),
-                "UDP bound"
-            );
+            trace!(local_in_udp = bnd_addr.to_string(), "UDP bound");
             let mut buffered_inbound = BufWriter::new(&mut inbound);
             socks5::CommandResponse::success(bnd_addr.into())
                 .write(&mut buffered_inbound)
@@ -200,18 +165,14 @@ async fn handle_client_connection_socks5(
                 .connect()
                 .await
                 .context("failed to establish snowy tunnel")?;
-            debug!(
-                client = client_addr.to_string(),
-                local_in = inbound.local_addr()?.to_string(),
-                local_out = snowys.as_inner().local_addr()?.to_string(),
-                remote = snowys.as_inner().peer_addr()?.to_string(),
-                dest = req.address.to_string(),
-                "relay udp"
-            );
-            let header = TrojanLikeRequest::new(Cmd::UdpAssociate, req.address);
-            relay_udp_with(&mut inbound, &mut inbound_udp, &mut snowys, header)
-                .await
-                .map_err(|e| e.into())
+            let header = TrojanLikeRequest::new(Cmd::UdpAssociate, Default::default());
+            log_relay!(relay_udp_with(
+                &mut inbound,
+                &mut inbound_udp,
+                &mut snowys,
+                header
+            ));
+            Ok(())
         }
         // not supported
         socks5::Command::Bind => {
@@ -221,12 +182,16 @@ async fn handle_client_connection_socks5(
     }
 }
 
+#[instrument(name = "http_proxy", skip(inbound, client_addr, connector), fields(
+    %client = client_addr,
+    // %local_in = inbound.local_addr().unwrap(),
+))]
 #[inline(always)]
-async fn handle_client_connection_http(
+async fn handle_connection_http(
     mut inbound: TcpStream,
     client_addr: SocketAddr,
     connector: Arc<impl Connector + 'static>,
-) -> Result<(u64, u64)> {
+) -> Result<()> {
     const HTTP_200_CONNECTION_ESTABLISHED: &[u8] =
         b"HTTP/1.1 200 Connection Established\r\nX-Powered-By: noisy-shuttle\r\n\r\n";
     const HTTP_400_BAD_REQUEST: &[u8] = b"HTTP/400 Bad Request\r\n\r\n<html><h1>Not Proxied Request</h1>Powered by noisy-shuttle</html>";
@@ -235,22 +200,23 @@ async fn handle_client_connection_http(
     use httparse::{Request, Status};
     let mut buf = unsafe { vec_uninit(MAX_FIRST_PACKET_SIZE) };
     let mut end = 0;
-    loop {
+    let (mut outbound, outbuf) = loop {
         let n = inbound.read(&mut buf).await?;
         ensure!(n > 0, "incompleted http request");
         end += n;
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = Request::new(&mut headers);
         if let Status::Complete(start) = req.parse(&buf[..end])? {
+            // some mysterious lifetime / borrow checking limits here
+            // so we have to process data in loop
             let method = req.method.unwrap();
             let url = req.path.unwrap();
             let hver = req.version.unwrap();
-            trace!(
-                "http proxy received {} from {:?}, url: {}, version: .{}",
-                method,
-                inbound,
+            info!(
+                %method,
                 url,
-                hver
+                version = %format!("1.{}", hver),
+                "accepting request",
             );
 
             let mut host = None;
@@ -276,38 +242,25 @@ async fn handle_client_connection_http(
                 Some(host) => Some(std::str::from_utf8(host).context("invalid Host")?),
                 None => None,
             };
-            trace!(
-                "http params by {:?}, host: {}, keepalive: {}",
-                inbound,
-                host.unwrap_or("<EMPTY>"),
-                keepalive
-            );
+            trace!(host = host.unwrap_or("<EMPTY>"), keepalive, "http params",);
 
-            match method {
+            break match method {
                 "CONNECT" => {
                     let dest_addr = trojan::Addr::from_str(url)
                         .ok()
                         .context("invalid address")?;
                     inbound.write_all(HTTP_200_CONNECTION_ESTABLISHED).await?;
-                    let mut snowys = connector
+                    let snowys = connector
                         .connect()
                         .await
                         .context("failed to establish snowy tunnel")?;
-                    debug!(
-                        via = "http CONNECT proxy",
-                        client = client_addr.to_string(),
-                        local_in = inbound.local_addr()?.to_string(),
-                        local_out = snowys.as_inner().local_addr()?.to_string(),
-                        remote = snowys.as_inner().peer_addr()?.to_string(),
-                        dest = dest_addr.to_string(),
-                        "relay tcp"
-                    );
+                    debug!(%dest_addr);
                     let header = TrojanLikeRequest::new(Cmd::Connect, dest_addr);
                     let mut outbuf = unsafe { vec_uninit(MAX_FIRST_PACKET_SIZE) };
                     let n = header.encode(&mut outbuf);
                     unsafe { outbuf.set_len(n) };
                     outbuf.extend_from_slice(&buf[start..end]);
-                    return relay_tcp_with(&mut inbound, &mut snowys, Some(outbuf)).await;
+                    (snowys, Some(outbuf))
                 }
                 method @ ("GET" | "POST" | "OPTIONS" | "HEAD" | "PUT" | "DELETE" | "TRACE"
                 | "PATCH") => {
@@ -335,15 +288,7 @@ async fn handle_client_connection_http(
                         .connect()
                         .await
                         .context("failed to establish snowy tunnel")?;
-                    debug!(
-                        via = "http proxy",
-                        client = client_addr.to_string(),
-                        local_in = inbound.local_addr()?.to_string(),
-                        local_out = snowys.as_inner().local_addr()?.to_string(),
-                        remote = snowys.as_inner().peer_addr()?.to_string(),
-                        dest = dest_addr.to_string(),
-                        "relay tcp"
-                    );
+                    debug!(%dest_addr);
                     let header = TrojanLikeRequest::new(Cmd::Connect, dest_addr);
                     let mut outbuf = unsafe { vec_uninit(MAX_FIRST_PACKET_SIZE) };
                     let n = header.encode(&mut outbuf);
@@ -366,30 +311,33 @@ async fn handle_client_connection_http(
                     let mut outbuf = cursor.into_inner();
                     unsafe { outbuf.set_len(n as usize) };
                     outbuf.extend_from_slice(&buf[start..end]);
-                    trace!(
-                        "sending request for {}: {:?}",
-                        client_addr,
-                        std::str::from_utf8(&outbuf)
-                    );
+                    trace!("sending request: {:?}", std::str::from_utf8(&outbuf));
                     snowys.write_all(&outbuf).await?;
-                    return relay_tcp_with(&mut inbound, &mut snowys, None).await;
+                    (snowys, None)
                 }
                 method => {
                     inbound.write_all(HTTP_405_METHOD_NOT_ALLOWED).await?;
                     return Err(anyhow!("unspported HTTP method: {}", method));
                 }
-            }
+            };
         }
-    }
+    };
+    let _t = Instant::now();
+    log_relay!(relay_tcp_with(&mut inbound, &mut outbound, outbuf));
+    Ok(())
 }
 
 // TODO: bullshit API design
-#[instrument]
+#[instrument(name = "tcp_relay", skip(inbound, outbound, outbuf), fields(
+    %local_out = outbound.as_inner().local_addr().unwrap(),
+    // %remote = outbound.as_inner().peer_addr().unwrap(),
+))]
 async fn relay_tcp_with(
     mut inbound: &mut TcpStream,
     mut outbound: &mut SnowyStream,
     outbuf: Option<Vec<u8>>,
 ) -> Result<(u64, u64)> {
+    debug!(outbuf_len = outbuf.as_ref().map(|b| b.len()), "starting");
     // Ref: https://github.com/trojan-gfw/trojan/blob/304054008bb01d6aad51c477b6b7d4e79a5853db/src/session/clientsession.cpp#L194
     // Try to send the request header in outbuf, if any, along with the first inbound packet to
     // prevent traffic from being distinguished by TLS frame size.
@@ -404,32 +352,37 @@ async fn relay_tcp_with(
             Ok(r) => {
                 let n = r.context("failed to read initial inbound data")?;
                 trace!(
-                    "received initial data of {}B from {:?} after {}",
-                    n,
-                    &inbound,
+                    data_len = n,
+                    "received initial data after {}",
                     t.elapsed().autofmt()
                 );
                 offset += n;
             }
-            _ => trace!("initial data waiting timeout, for {:?}", &inbound),
+            _ => trace!("timeout waiting initial data"),
         }
         outbound
             .write_all(&outbuf[..offset])
             .await
             .context("failed to write request header together with initial inbound data")?;
     }
-    tokio::io::copy_bidirectional(&mut outbound, &mut inbound)
+    tokio::io::copy_bidirectional(&mut inbound, &mut outbound)
         .await
         .map_err(|e| e.into())
 }
 
-#[instrument]
+#[instrument(name = "udp_relay", skip(inbound_tcp, inbound, outbound, header), fields(
+    %client_udp_nominal = header.dest_addr,
+    %local_in_udp = inbound.local_addr().unwrap(),
+    %local_out = outbound.as_inner().local_addr().unwrap(),
+    // %remote = outbound.as_inner().peer_addr().unwrap(),
+))]
 async fn relay_udp_with(
     inbound_tcp: &mut TcpStream,
     inbound: &mut UdpSocket,
     outbound: &mut SnowyStream,
     header: TrojanLikeRequest,
-) -> io::Result<(u64, u64)> {
+) -> Result<(u64, u64)> {
+    debug!("starting");
     let (outr, outw) = tokio::io::split(outbound);
     let mut outr = BufReader::new(outr);
     let mut outw = BufWriter::new(outw);
@@ -437,52 +390,40 @@ async fn relay_udp_with(
     // NOTE: this effectively limit the max size of the first packet to be MAX_DATAGRAM_SIZE -
     // outbuf.len()
     header.write(&mut outw).await?;
+    let mut tx = 0;
+    let mut rx = 0;
     let atob = async {
         let mut buf = unsafe { vec_uninit(MAX_DATAGRAM_SIZE) };
         loop {
             let (n, client_addr) = inbound.recv_from(&mut buf).await?;
             if inbound.peer_addr().is_err() {
                 // associate the addr per the first packet, since the inbound may be behind NAT
-                trace!(
-                    client_tcp = inbound_tcp.peer_addr()?.to_string(),
-                    local_in_tcp = inbound_tcp.local_addr()?.to_string(),
-                    client_udp = inbound.peer_addr()?.to_string(),
-                    local_in_udp = inbound.local_addr()?.to_string(),
-                    "UDP associated"
-                );
+                trace!(client_udp = %inbound.peer_addr()?, "UDP associated");
                 inbound.connect(&client_addr).await?;
             }
             if buf[2] != 0 {
                 // rejects fragments for simplicity
                 continue;
             }
-            let dest_addr = socks5::Address::read_from(&mut io::Cursor::new(&buf[3..n]))
-                .map_err(|e| e.to_io_err())?;
+            let dest_addr = socks5::Address::read_from(&mut io::Cursor::new(&buf[3..n]))?;
             let addrlen = dest_addr.serialized_len().unwrap();
 
             // When sending udp packet from server to client, addr is the original address that the
             // UDP socket on server received.
-            trace!(
-                len = n,
-                "sending a UDP packet from {} to {}",
-                &client_addr,
-                &dest_addr
-            );
+            trace!(%dest_addr, len = n, "sending a UDP packet");
             outw.send_to(&buf[3 + addrlen..n], dest_addr).await?;
             outw.flush().await?;
-            // tx += n;
+            tx += n as u64;
         }
     };
     let btoa = async {
         let mut buf = unsafe { vec_uninit(MAX_DATAGRAM_SIZE) }; // + header?
         loop {
-            let (n, orig_addr) = outr.recv_from(&mut buf).await?;
-            trace!(
-                len = n,
-                "receiving a UDP packet from {} to {}",
-                &orig_addr,
-                inbound.peer_addr().unwrap(),
-            );
+            let (n, orig_addr) = match outr.recv_from(&mut buf).await? {
+                Some(inner) => inner,
+                None => return Ok(()),
+            };
+            trace!(%orig_addr, len = n, "receiving a UDP packet");
             let addrlen = orig_addr.serialized_len().unwrap();
             buf.copy_within(0..n, 2 + 1 + addrlen);
             buf[0..3].copy_from_slice(&[0x00, 0x00, 0x00]);
@@ -490,9 +431,51 @@ async fn relay_udp_with(
                 .write_to(&mut Cursor::new(&mut buf[3..3 + addrlen]))
                 .unwrap();
             inbound.send(&buf[..n + addrlen]).await?;
+            rx += n as u64;
         }
     };
-
-    let (_rab, _rba): (io::Result<()>, io::Result<()>) = tokio::join!(atob, btoa);
-    Ok((0, 0)) // FIX: cnt
+    let f = async {
+        let r: (Result<()>, Result<()>) = tokio::join!(atob, btoa);
+        r
+    };
+    // keep relaying as long as the TCP control connection is active
+    tokio::select! {
+        r = inbound_tcp.read_u8() => match r {
+            Ok(_) => Err(anyhow!("unexpected data received from tcp connection")),
+            Err(e) => match e.kind() {
+                io::ErrorKind::UnexpectedEof => Ok((tx, rx)),
+                _ => Err(e).context("control connection terminated")
+            }
+        },
+        (r1, r2) = f => match (r1, r2) {
+            (Err(e), _) => Err(e).context("error when forward data from peer to remote"),
+            (_, Err(e)) => Err(e).context("error when forward data from remote to peer"),
+            _ => unreachable!()
+        }
+    }
 }
+
+macro_rules! log_relay {
+    ($fut: expr) => {
+        let t = Instant::now();
+        match $fut.await
+        {
+            Ok((tx, rx)) => {
+                info!(
+                    tx,
+                    rx,
+                    "relay closed after {}",
+                    t.elapsed().autofmt(),
+                );
+            }
+            Err(error) => {
+                warn!(
+                    error = %format!("{:#}", error),
+                    "relay terminated after {}",
+                    t.elapsed().autofmt(),
+                );
+            }
+        }
+    }
+}
+use log_relay;

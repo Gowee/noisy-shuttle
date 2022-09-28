@@ -29,156 +29,137 @@ pub async fn run_server(opt: SvrOpt) -> Result<()> {
         .await
         .with_context(|| format!("Failed to listen on local addr: {:?}", opt.listen_addr))?;
     while let Ok((inbound, client_addr)) = listener.accept().await {
+        debug!("accepting connection from {}", &client_addr);
         let server = server.clone();
         let opt = opt.clone();
-        tokio::spawn(handle_server_connection(server, inbound, client_addr, opt));
+        // convention: handle_connection only returns error in early/handshake phases
+        tokio::spawn(async move {
+            if let Err(error) = handle_connection(server, inbound, client_addr, opt).await {
+                warn!(error = %format!("{:#}", error), "failed to serve {}", &client_addr)
+            }
+        });
     }
     Ok(())
 }
 
-#[instrument(level = "trace")]
-pub async fn handle_server_connection<A: ToSocketAddrs + Debug>(
+/// Serve a single inbound connection
+#[instrument(name = "serve", skip(server, inbound, client_addr, opt), fields(
+    peer = %client_addr
+))]
+pub async fn handle_connection<A: ToSocketAddrs + Debug>(
     server: Arc<Server<A>>,
     inbound: TcpStream,
     client_addr: SocketAddr,
     opt: Arc<SvrOpt>,
-) -> io::Result<(u64, u64)> {
-    #[inline(always)]
-    async fn fallback_relay_with(
-        a: &mut TcpStream,
-        client_addr: &SocketAddr,
-        camouflage_addr: impl ToSocketAddrs + Debug,
-        bufin: &[u8],
-        note: &str,
-    ) -> io::Result<(u64, u64)> {
-        info!(
-            "camouflage relay: {} -> {:?} ({})",
-            &client_addr, &camouflage_addr, note
-        );
-        let mut b = TcpStream::connect(camouflage_addr).await?;
-        b.write_all(bufin).await?;
-        let r = tokio::io::copy_bidirectional(a, &mut b).await;
-        match r {
-            Ok((tx, rx)) => {
-                debug!(tx, rx, "fallback relay {:?} <-> {:?} closed", a, b);
-            }
-            Err(ref e) => {
-                debug!(
-                    "fallback relay {:?} <-> {:?} terminated with error {:?}",
-                    a, b, e
-                );
-            }
-        }
-        r
-    }
-
-    debug!("accepting connection from {}", &client_addr);
+) -> Result<()> {
     use snowy_tunnel::AcceptError::*;
     match server.accept(inbound).await {
         Ok(mut snowys) => {
             use crate::trojan::Cmd::*;
-            let req = read_trojan_like_request(&mut snowys).await?;
-            trace!("trojan like request from {}: {:?}", &client_addr, &req);
+            let req = read_trojan_like_request(&mut snowys)
+                .await
+                .context("failed to read request header")?;
+            info!(command=?req.cmd, dest_addr=%req.dest_addr, "accepting request");
             match req.cmd {
                 Connect => {
-                    let mut outbound =
-                        call_with_addr!(TcpStream::connect, req.dest_addr).map_err(|e| {
-                            warn!(
-                                "failed to connect to remote when serving {}: {}",
-                                &client_addr, e
-                            );
-                            e
-                        })?;
+                    let mut outbound = call_with_addr!(TcpStream::connect, req.dest_addr)
+                        .context("failed to connect to remote")?;
                     debug!(
-                        peer = &client_addr.to_string(),
-                        local_in = snowys.as_inner().local_addr().unwrap().to_string(),
                         local_out = outbound.local_addr().unwrap().to_string(),
                         remote = outbound.peer_addr().unwrap().to_string(),
-                        "tcp relay"
+                        "starting tcp relay"
                     );
-                    let r = tokio::io::copy_bidirectional(&mut snowys, &mut outbound).await;
-                    match r {
-                        Ok((tx, rx)) => info!(tx, rx, "relay for {} closed", &client_addr),
-                        Err(ref e) => {
-                            warn!("relay for {} terminated with error {}", &client_addr, e)
-                        }
+                    match tokio::io::copy_bidirectional(&mut snowys, &mut outbound).await {
+                        Ok((tx, rx)) => info!(tx, rx, "relay closed"),
+                        Err(error) => warn!(?error, "relay terminated"),
                     }
-                    r
+                    Ok(())
                 }
                 UdpAssociate => {
                     // do not connect, allowing UDP punching
                     let mut outbound = UdpSocket::bind("0.0.0.0:0").await?;
                     debug!(
-                        peer = &client_addr.to_string(),
-                        local_in = snowys.as_inner().local_addr().unwrap().to_string(),
                         local_out = outbound.local_addr().unwrap().to_string(),
                         remote = req.dest_addr.to_string(),
-                        "tcp relay"
+                        "starting udp relay"
                     );
-                    relay_udp(&mut snowys, &mut outbound).await?;
-                    // TODO: log
-                    Ok((0, 0))
+                    match relay_udp(&mut snowys, &mut outbound).await {
+                        Ok((tx, rx)) => info!(tx, rx, "relay udp closed"),
+                        Err(error) => warn!(?error, "relay udp terminated"),
+                    }
+                    Ok(())
                 } // Bind => return Err(io::Error::new(io::ErrorKind::Other, "Bind command not supported"))
             }
         }
-        Err(IoError(e)) => {
-            warn!("failed to accept connection from {}: {}", &client_addr, e);
-            Err(e)
-        }
-        Err(ServerHelloInvalid {
-            buf,
-            mut inbound,
-            mut outbound,
-        }) => {
-            warn!(
-                "invalid server hello received from {} when handling {}",
-                outbound.peer_addr().unwrap().to_string(),
-                &client_addr
-            );
-            // an invalid ServerHello might be the result of a strange ClientHello fabricated by
-            // a malicious client, so just copy_bidi as usual in this case
-            Ok(async {
-                inbound.write_all(&buf).await?;
-                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await
-                // TODO: log
-            }
-            .await
-            .unwrap_or((0, 0)))
-        }
+        Err(IoError(e)) => Err(e).context("failed to accept connection"),
         Err(e) => {
-            let (buf, mut io, note) = match e {
-                ReplayDetected {
-                    buf,
-                    io,
-                    nonce,
-                    first_from,
-                } => {
-                    warn!(
-                        "replay detected from {}, nonce: {:x?}, first from: {}",
-                        &client_addr, &nonce, &first_from
-                    );
-                    (buf, io, "pooh's agent")
+            let fut = async {
+                match e {
+                    ServerHelloInvalid {
+                        buf,
+                        mut inbound,
+                        mut outbound,
+                    } => {
+                        warn!(
+                            "invalid server hello received from {} when handling {}",
+                            outbound.peer_addr()?.to_string(),
+                            &client_addr
+                        );
+                        // an invalid ServerHello might be the result of a strange ClientHello fabricated by
+                        // a malicious client, so just copy_bidi as usual in this case
+                        inbound.write_all(&buf).await?;
+                        tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await
+                    }
+                    ReplayDetected {
+                        buf,
+                        mut io,
+                        nonce,
+                        first_from,
+                    } => {
+                        warn!(
+                            "replay detected from {}, nonce: {:x?}, first from: {}",
+                            &client_addr, &nonce, &first_from
+                        );
+                        info!("fallback relay (pooh's agent)");
+                        let mut b = TcpStream::connect(&opt.camouflage_addr).await?;
+                        b.write_all(&buf).await?;
+                        tokio::io::copy_bidirectional(&mut io, &mut b).await
+                    }
+                    Unauthenticated { buf, mut io } => {
+                        info!("fallback relay (unauthenticated)");
+                        let mut b = TcpStream::connect(&opt.camouflage_addr).await?;
+                        b.write_all(&buf).await?;
+                        tokio::io::copy_bidirectional(&mut io, &mut b).await
+                    }
+                    ClientHelloInvalid { buf, mut io } => {
+                        info!("fallback relay (client protocol unrecognized)");
+                        let mut b = TcpStream::connect(&opt.camouflage_addr).await?;
+                        b.write_all(&buf).await?;
+                        tokio::io::copy_bidirectional(&mut io, &mut b).await
+                    }
+                    _ => unreachable!(),
                 }
-                Unauthenticated { buf, io } => (buf, io, "unauthenticated"),
-                ClientHelloInvalid { buf, io } => (buf, io, "client protocol unrecognized"),
-                _ => unreachable!(),
             };
-            // result is of no interest for unidenfitied clients
-            Ok(
-                fallback_relay_with(&mut io, &client_addr, &opt.camouflage_addr, &buf, note)
-                    .await
-                    .unwrap_or((0, 0)),
-            )
+            match fut.await {
+                Ok((tx, rx)) => {
+                    debug!(tx, rx, "fallback relay closed");
+                }
+                Err(error) => {
+                    debug!(%error, "fallback relay with error");
+                }
+            }
+            Ok(())
         }
     }
 }
 
 /// Relay traffic between the incoming stream and the outbound UdpSocket
+#[instrument(name = "udp_relay", skip(inbound, outbound), fields(local_out_udp=%outbound.local_addr().unwrap()))]
 async fn relay_udp(
     inbound: &mut SnowyStream,
     outbound: &mut UdpSocket,
 ) -> io::Result<(usize, usize)> {
-    let client_addr = inbound.as_inner().peer_addr()?;
+    let _client_addr = inbound.as_inner().peer_addr()?;
     // SnowyStream buffers read internally but not write.
     // Every write to SnowyStream results in a standalone TLS frame, while TrojanLikeUdpDatagram
     // may write multiple times per packet. So buffer it to avoid packet structure leakage.
@@ -187,17 +168,17 @@ async fn relay_udp(
     // TODO: serious global resolver
     let mut resolved_addrs: LruCache<(String, u16), SocketAddr> =
         LruCache::new(MAX_CACHED_DOMAIN_ADDRS_PER_SOCKET);
+    let mut tx = 0;
+    let mut rx = 0;
     let atob = async {
         let mut buf = unsafe { vec_uninit(MAX_DATAGRAM_SIZE) };
         loop {
-            let (n, addr) = inr.recv_from(&mut buf).await?;
-            trace!(
-                len = n,
-                "sending a UDP packet from {} to {}",
-                &client_addr,
-                &addr
-            );
-            match addr {
+            let (n, dest_addr) = match inr.recv_from(&mut buf).await? {
+                Some(inner) => inner,
+                None => return Ok(()),
+            };
+            trace!(%dest_addr, len = n, "sending a UDP packet");
+            match dest_addr {
                 Addr::SocketAddr(ref sa) => outbound.send_to(&buf[..n], sa).await?,
                 Addr::Domain(h, p) => {
                     let hp = (h, p);
@@ -217,27 +198,34 @@ async fn relay_udp(
                     outbound.send_to(&buf[..n], sa).await?
                 }
             };
+            tx += n;
         }
-        // Ok::<(), io::Error>
     };
     let btoa = async {
         let mut buf = unsafe { vec_uninit(MAX_DATAGRAM_SIZE) };
         loop {
-            let (n, remote_addr) = outbound.recv_from(&mut buf).await?;
+            let (n, orig_addr) = outbound.recv_from(&mut buf).await?;
             // When sending udp packet from server to client, addr is the original address that the
             // UDP socket on server received.
-            trace!(
-                len = n,
-                "receiving a UDP packet from {} to {}",
-                &remote_addr,
-                &client_addr
-            );
-            inw.send_to(&buf[..n], remote_addr.into()).await?;
+            trace!(%orig_addr, len = n, "receiving a UDP packet");
+            inw.send_to(&buf[..n], orig_addr.into()).await?;
             inw.flush().await?;
-            // tx += n;
+            rx += n;
         }
     };
-    // TODO: when to exit on error?
-    let (_rab, _rba): (io::Result<()>, io::Result<()>) = tokio::join!(atob, btoa);
-    Ok((0, 0))
+    // Terminate the relay when inbound reaches EoF.
+    // This might violate the semantics of TCP half-open. TODO: Continue btoa with timeout?
+    tokio::select! {
+        r1 = atob => {
+            let r1: io::Result<()> = r1; // annotate type
+            match r1 {
+                Ok(()) => Ok((tx, rx)),
+                Err(e) => Err(e)
+            }
+        }
+        r2 = btoa => {
+            let r2: io::Result<()> = r2; // annotate type
+            Err(r2.unwrap_err())
+        }
+    }
 }

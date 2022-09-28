@@ -195,7 +195,7 @@ impl Connector for AdHocConnector {
     async fn connect(&self) -> io::Result<SnowyStream> {
         let t = Instant::now();
         let s = TcpStream::connect(self.remote_addr.as_str()).await?;
-        debug!("handshaked {:?} within {}", s, t.elapsed().autofmt());
+        debug!(stream=?s, "handshaked within {}", t.elapsed().autofmt());
         self.client.connect(s).await
     }
 }
