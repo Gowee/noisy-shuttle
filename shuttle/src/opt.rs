@@ -53,12 +53,12 @@ pub struct CltOpt {
     #[structopt(short ="p", long = "preflight", default_value = "0", parse(try_from_str = parse_preflight_bounds))]
     pub preflight: (usize, Option<usize>),
 
-    /// Activate transparent proxy mode, instructing the client to accept raw REDIRECTed TCP
-    /// traffic and TPROXY-ed UDP traffic (plain proxy is disabled in this case)
-    #[cfg(unix)]
-    #[structopt(long = "redir")]
-    pub redir: bool,
-
+    // UNIMPLEMENTED
+    // /// Activate transparent proxy mode, instructing the client to accept raw REDIRECTed TCP
+    // /// traffic and TPROXY-ed UDP traffic (plain proxy is disabled in this case)
+    // #[cfg(unix)]
+    // #[structopt(long = "redir")]
+    // pub redir: bool,
     /// JA3 TLS fingerprint to apply to ClientHello (possbily resulted in handshake error due to unsupported algos negotiated)
     #[structopt(long = "tls-ja3", name = "ja3")]
     pub tls_ja3: Option<Ja3>,

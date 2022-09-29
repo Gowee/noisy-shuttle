@@ -8,7 +8,7 @@ use crate::opt::CltOpt;
 
 mod connector;
 mod plain;
-mod redir;
+// mod redir; // UNIMPLEMENTED
 
 use self::connector::{AdHocConnector, Preflighter, PREFLIHGTER_CONNIDLE, PREFLIHGTER_EMA_COEFF};
 use self::plain::serve as serve_plain;
