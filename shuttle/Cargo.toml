@@ -24,4 +24,5 @@ socks5-protocol = { version = "0.3", features = ["sync"] }
 httparse = "1.8"
 
 snowy-tunnel = { path = "../tunnel" }
+structopt-flags = "0.3.6"
 

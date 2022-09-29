@@ -36,17 +36,22 @@ noisy-shuttle is essentially shadow-tls + trojan + shadowsocks. -->
 
 **Server:**
 ```sh
-# server               listen_addr camouflage website  password
-./noisy-shuttle server 0.0.0.0:443 www.example.com:443 Teap0taa
+# server               listen_addr   camouflage_addr   password
+./noisy-shuttle server 0.0.0.0:443 www.example.com:443 Teap0taa -v
 ```
 
-Note that `BUILTIN_HTTP_PROXY` here is a self-explanatory reserved keyword. Otherwise, there can also be a `HOST:PORT` addr of a upstream service (say, a standalone socks5 server).
+`camouflage_addr` to where TLS handshaking requests from clients are forwarded and from where responses are forwarded backed to clients.
+Typically, it should be a well-known website that looks "innocent". The port cannot be omitted. 
 
 **Client:**
 ```sh
-# client                listen_addr     remote_addr                sni        password
-./noisy-shuttle client 127.0.0.1:8080 server.addr.example:443 www.example.com Teap0taa
+# client                listen_addr        remote_addr             sni        password
+./noisy-shuttle client 127.0.0.1:8080 server.addr.example:443 www.example.com Teap0taa -v
 ```
+
+`remote_addr` is where the shuttle server is located.
+
+`sni` should match `camouflage_addr` specified server-side.
 
 Or optionally with a customized TLS fingerprint ([chrome](https://tlsfingerprint.io/id/e47eae8f8c4887b6)):
 ```sh

@@ -33,8 +33,9 @@ const MAX_FIRST_PACKET_SIZE: usize = 8192;
 const FIRST_PACKET_TIMEOUT: Duration = Duration::from_millis(20);
 
 pub async fn run_client(opt: CltOpt) -> Result<()> {
-    info!(
-        "client is up with remote: {}, sni: {}, preflight: {}–{}",
+    warn!(
+        "client listens at {} with remote: {}, sni: {}, preflight: {}-{}",
+        &opt.listen_addr,
         &opt.remote_addr,
         &opt.server_name,
         &opt.preflight.0,

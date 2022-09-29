@@ -22,7 +22,10 @@ use crate::utils::vec_uninit;
 const MAX_CACHED_DOMAIN_ADDRS_PER_SOCKET: usize = 64;
 
 pub async fn run_server(opt: SvrOpt) -> Result<()> {
-    info!("server is up with camouflage: {}", &opt.camouflage_addr);
+    warn!(
+        "server listens at {} with camouflage: {}",
+        &opt.listen_addr, &opt.camouflage_addr
+    );
     let server = Arc::new(opt.build_server());
     let opt = Arc::new(opt);
     let listener = TcpListener::bind(opt.listen_addr)

@@ -1,6 +1,7 @@
 use ja3_rustls::{ConcatenatedParser, Ja3};
 use structopt::clap::AppSettings::{ColoredHelp, DeriveDisplayOrder};
 use structopt::StructOpt;
+use structopt_flags::QuietVerbose;
 
 use std::fmt::Debug;
 use std::net::SocketAddr;
@@ -13,10 +14,19 @@ type Array<T> = Vec<T>;
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, StructOpt)]
 #[structopt(name = "noisy-shuttle", about = "Shuttle for the Internet", global_settings(&[ColoredHelp, DeriveDisplayOrder]))]
-pub enum Opt {
-    /// Runs client
+pub struct Opt {
+    #[structopt(flatten)]
+    pub verbose: QuietVerbose,
+
+    #[structopt(subcommand)]
+    pub role: Role,
+}
+
+#[derive(Debug, Clone, StructOpt)]
+pub enum Role {
+    /// Run client
     Client(CltOpt),
-    /// Runs server
+    /// Run server
     Server(SvrOpt),
 }
 
