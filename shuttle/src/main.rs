@@ -10,7 +10,6 @@ use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
 mod client;
-mod connector;
 mod opt;
 mod server;
 mod trojan;
@@ -40,10 +39,7 @@ async fn main() -> Result<()> {
         // // Display the thread ID an event was recorded on
         // .with_thread_ids(true)
         // // Don't display the event's target (module path)
-        .with_target(match loglevel {
-            LevelFilter::TRACE | LevelFilter::DEBUG => true,
-            _ => false,
-        })
+        .with_target(matches!(loglevel, LevelFilter::TRACE | LevelFilter::DEBUG))
         // Build the subscriber
         .init();
 

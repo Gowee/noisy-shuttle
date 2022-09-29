@@ -11,60 +11,19 @@ use std::io::{self, Cursor, Write};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use snowy_tunnel::SnowyStream;
 
-use crate::connector::{
-    AdHocConnector, Connector, Preflighter, PREFLIHGTER_CONNIDLE, PREFLIHGTER_EMA_COEFF,
-};
-use crate::opt::CltOpt;
 use crate::trojan::{
     self, Cmd, TrojanLikeRequest, TrojanUdpDatagramReceiver, TrojanUdpDatagramSender,
     MAX_DATAGRAM_SIZE,
 };
 use crate::utils::{extract_host_addr_from_url, url_to_relative, vec_uninit, DurationExt};
 
-/// Maximum size of the initial data from inbound TCP socket which would be sent together with
-/// request header
-const MAX_FIRST_PACKET_SIZE: usize = 8192;
-/// Time to wait for the initial data from inbound TCP socket which would be sent together with
-/// request header
-const FIRST_PACKET_TIMEOUT: Duration = Duration::from_millis(20);
+use super::connector::Connector;
+use super::{FIRST_PACKET_TIMEOUT, MAX_FIRST_PACKET_SIZE};
 
-pub async fn run_client(opt: CltOpt) -> Result<()> {
-    warn!(
-        "client listens at {} with remote: {}, sni: {}, preflight: {}-{}",
-        &opt.listen_addr,
-        &opt.remote_addr,
-        &opt.server_name,
-        &opt.preflight.0,
-        &opt.preflight.1.unwrap_or(usize::MAX),
-    );
-    debug!(
-        connidle = PREFLIHGTER_CONNIDLE,
-        aht_ema_coeff = PREFLIHGTER_EMA_COEFF
-    );
-    let client = opt.build_client();
-    if !client.fingerprint_spec.is_empty() {
-        info!("tls fingerprint loaded");
-        debug!(fpspec = ?client.fingerprint_spec);
-    }
-
-    match opt.preflight {
-        (0, Some(0)) => {
-            let connector = AdHocConnector::new(client, opt.remote_addr);
-            serve(opt.listen_addr, connector).await?;
-        }
-        (min, max) => {
-            let preflighter = Preflighter::new_flighting(client, opt.remote_addr, min, max);
-            serve(opt.listen_addr, preflighter).await?;
-        }
-    };
-    Ok(())
-}
-
-async fn serve(
+pub async fn serve(
     listen_addr: SocketAddr,
     connector: impl Connector + 'static + Send + Sync,
 ) -> Result<()> {
@@ -201,6 +160,7 @@ async fn handle_connection_http(
     use httparse::{Request, Status};
     let mut buf = unsafe { vec_uninit(MAX_FIRST_PACKET_SIZE) };
     let mut end = 0;
+    let mut initlen = 0; // initial data length
     let (mut outbound, outbuf) = loop {
         let n = inbound.read(&mut buf).await?;
         ensure!(n > 0, "incompleted http request");
@@ -308,6 +268,7 @@ async fn handle_connection_http(
                             .unwrap();
                     }
                     io::Write::write(&mut cursor, b"\r\n").unwrap();
+                    initlen = cursor.position() - n as u64 + (end - start) as u64;
                     let n = cursor.position();
                     let mut outbuf = cursor.into_inner();
                     unsafe { outbuf.set_len(n as usize) };
@@ -324,7 +285,11 @@ async fn handle_connection_http(
         }
     };
     let _t = Instant::now();
-    log_relay!(relay_tcp_with(&mut inbound, &mut outbound, outbuf));
+    log_relay!(async {
+        relay_tcp_with(&mut inbound, &mut outbound, outbuf)
+            .await
+            .map(|(tx, rx)| (tx + initlen, rx))
+    });
     Ok(())
 }
 
@@ -344,6 +309,7 @@ async fn relay_tcp_with(
     // prevent traffic from being distinguished by TLS frame size.
     // This assumes client typically send before reading data after a connection is established.
     // Set a timeout in case client expects receiving at first.
+    let mut initlen = 0;
     if let Some(mut outbuf) = outbuf {
         let mut offset = outbuf.len();
         outbuf.reserve_exact(MAX_FIRST_PACKET_SIZE - outbuf.len());
@@ -351,13 +317,13 @@ async fn relay_tcp_with(
         let t = Instant::now();
         match timeout(FIRST_PACKET_TIMEOUT, inbound.read(&mut outbuf[offset..])).await {
             Ok(r) => {
-                let n = r.context("failed to read initial inbound data")?;
+                initlen = r.context("failed to read initial inbound data")?;
                 trace!(
-                    data_len = n,
+                    data_len = initlen,
                     "received initial data after {}",
                     t.elapsed().autofmt()
                 );
-                offset += n;
+                offset += initlen;
             }
             _ => trace!("timeout waiting initial data"),
         }
@@ -366,9 +332,8 @@ async fn relay_tcp_with(
             .await
             .context("failed to write request header together with initial inbound data")?;
     }
-    tokio::io::copy_bidirectional(&mut inbound, &mut outbound)
-        .await
-        .map_err(|e| e.into())
+    let (tx, rx) = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await?;
+    Ok((tx + initlen as u64, rx))
 }
 
 #[instrument(name = "udp_relay", skip(inbound_tcp, inbound, outbound, header), fields(

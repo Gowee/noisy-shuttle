@@ -11,7 +11,6 @@ use snowy_tunnel::{Client, FingerprintSpec, Server};
 
 type Array<T> = Vec<T>;
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, StructOpt)]
 #[structopt(name = "noisy-shuttle", about = "Shuttle for the Internet", global_settings(&[ColoredHelp, DeriveDisplayOrder]))]
 pub struct Opt {
@@ -22,6 +21,7 @@ pub struct Opt {
     pub role: Role,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, StructOpt)]
 pub enum Role {
     /// Run client
@@ -32,7 +32,7 @@ pub enum Role {
 
 #[derive(Debug, Clone, StructOpt)]
 pub struct CltOpt {
-    /// Local HOST:PORT address to listen on
+    /// Local HOST:PORT address for the builtin proxy server to listen on
     #[structopt(name = "LISTEN_ADDR")]
     pub listen_addr: SocketAddr,
 
@@ -48,9 +48,16 @@ pub struct CltOpt {
     #[structopt(name = "KEY")]
     pub key: String,
 
-    /// Number or range of connections to establish in advance (shortening perceivable delay at risk of higher possibility of being distinguished)
+    /// Number or range of connections to establish in advance (shortening perceivable delay at
+    /// risk of higher possibility of being distinguished)
     #[structopt(short ="p", long = "preflight", default_value = "0", parse(try_from_str = parse_preflight_bounds))]
     pub preflight: (usize, Option<usize>),
+
+    /// Activate transparent proxy mode, instructing the client to accept raw REDIRECTed TCP
+    /// traffic and TPROXY-ed UDP traffic (plain proxy is disabled in this case)
+    #[cfg(unix)]
+    #[structopt(long = "redir")]
+    pub redir: bool,
 
     /// JA3 TLS fingerprint to apply to ClientHello (possbily resulted in handshake error due to unsupported algos negotiated)
     #[structopt(long = "tls-ja3", name = "ja3")]
