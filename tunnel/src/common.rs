@@ -30,6 +30,7 @@ pub const DEFAULT_ALPN_PROTOCOLS: [&[u8]; 2] = [b"http/2".as_slice(), b"http/1.1
 
 const CONTEXT: &[u8] = b"the secure tunnel under snow";
 
+/// Secure tunnel on the top of TcpStream encrypted by Noise
 // #[derive(Debug)]
 pub struct SnowyStream {
     pub(crate) socket: TcpStream,
@@ -43,6 +44,9 @@ pub struct SnowyStream {
 }
 
 impl SnowyStream {
+    /// Create a snowy tunnel by wrapping a TCP connection with negotiated Noise state.
+    ///
+    /// Generally, it is not intended to be used directly by external callers.
     pub fn new(io: TcpStream, noise: TransportState) -> Self {
         SnowyStream {
             socket: io,

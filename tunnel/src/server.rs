@@ -21,6 +21,7 @@ use crate::utils::{
     u16_from_be_slice, TlsMessageExt,
 };
 
+/// Server with config to establish snowy tunnels with peer clients
 #[derive(Debug)]
 pub struct Server<A: ToSocketAddrs + Debug> {
     pub key: [u8; PSKLEN],
@@ -30,6 +31,12 @@ pub struct Server<A: ToSocketAddrs + Debug> {
 }
 
 impl<A: ToSocketAddrs + Debug> Server<A> {
+    /// Create a server with a pre-shared key, a camouflage server address, and a capacity of the
+    /// internal LRU-based replay filter queue.
+    ///
+    /// The camouflage server address is to where TLS handshakes from clients are forwarded and
+    /// from where responses are forwarded backed to clients. Generally, it should match the server
+    /// name specified in a tunnel's client-side.
     pub fn new(key: impl AsRef<[u8]>, camouflage_addr: A, replay_filter_size: usize) -> Self {
         let key = key.as_ref();
         Server {
@@ -40,6 +47,19 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
         }
     }
 
+    /// Accept a incoming TcpStream as a snowy tunnel.
+    ///
+    /// The server tries to authenticate a client by a Noise handshake message piggybacked by a TLS
+    /// ClientHello (the first message in TLS handshakes). If the client is successfully
+    /// authenticated as a tunnel peer, the server starts to forward traffic between the client and
+    /// the camouflage server until TLS handshakes are finished. After that, the server sends back
+    /// noise handshake in response to the client's challenge and transmute the connection into a
+    /// snowy tunnel.
+    ///
+    /// If the client is not authenticated, it returns immediately with pending buffer exposed in
+    /// [`AcceptError`]. The caller may decide to proceed to forward traffic between the client and
+    /// the camouflage server on its own (falling back to dumb relay) or just reject/drop the
+    /// connection.
     pub async fn accept(&self, mut inbound: TcpStream) -> Result<SnowyStream, AcceptError> {
         use AcceptError::*;
 
@@ -149,7 +169,7 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
                     inbound.peer_addr().unwrap(),
                     outbound.peer_addr().unwrap()
                 );
-                relay_until_handshake_finished(&mut inbound, &mut outbound).await?;
+                relay_until_tls12_handshake_finished(&mut inbound, &mut outbound).await?;
                 debug!(
                     "{} <-> {} full handshake done",
                     inbound.peer_addr().unwrap(),
@@ -182,6 +202,7 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
     }
 }
 
+/// Error returned by [`Server::accept`] with self-explanatory fields
 pub enum AcceptError {
     IoError(io::Error),
     Unauthenticated {
@@ -212,7 +233,7 @@ impl From<io::Error> for AcceptError {
 }
 
 // Adapted from: https://github.com/ihciah/shadow-tls/blob/2bbdc26cff1120ba9c8eded39ad743c4c4f687c4/src/protocol.rs#L138
-async fn copy_until_handshake_finished<'a>(
+async fn copy_until_tls12_handshake_finished<'a>(
     mut read_half: ReadHalf<'a>,
     mut write_half: WriteHalf<'a>,
 ) -> io::Result<()> {
@@ -259,15 +280,15 @@ async fn copy_until_handshake_finished<'a>(
     Ok(())
 }
 
-async fn relay_until_handshake_finished(
+async fn relay_until_tls12_handshake_finished(
     inbound: &mut TcpStream,
     outbound: &mut TcpStream,
 ) -> io::Result<()> {
     let (rin, win) = inbound.split();
     let (rout, wout) = outbound.split();
     let (a, b) = tokio::join!(
-        copy_until_handshake_finished(rin, wout),
-        copy_until_handshake_finished(rout, win)
+        copy_until_tls12_handshake_finished(rin, wout),
+        copy_until_tls12_handshake_finished(rout, win)
     );
     a?;
     b?;

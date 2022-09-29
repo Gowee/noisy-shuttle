@@ -10,7 +10,7 @@ tokio = "1.21"
 futures = "0.3"
 anyhow = "1.0"
 structopt = "0.3"
-clap = "3.2"
+clap = { version = "3.2" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [ "env-filter" ] }
 lru = "0.7"

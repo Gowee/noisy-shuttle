@@ -26,6 +26,7 @@ use super::common::{
     PSKLEN, TLS_RECORD_HEADER_LENGTH,
 };
 
+/// Client with config to establish snowy tunnels with peer servers
 #[derive(Debug, Clone)]
 pub struct Client {
     pub key: [u8; PSKLEN],
@@ -36,6 +37,10 @@ pub struct Client {
 }
 
 impl Client {
+    /// Create a client with a pre-shared key and a server name for camouflage
+    ///
+    /// The server name would be sent out as [Server Name Indication](https://en.wikipedia.org/wiki/Server_Name_Indication).
+    /// Generally, it should match the camouflage server address specified on a tunnel's server-side. .
     pub fn new(key: impl AsRef<[u8]>, server_name: ServerName) -> Self {
         let key = key.as_ref();
         Client {
@@ -45,6 +50,9 @@ impl Client {
             totp: Totp::new(key, 60, 2),
         }
     }
+
+    /// Create a client with a pre-shared key, a server name for camouflage and additionally a
+    /// fingerprint specification used to apply to TLS ClientHello
     pub fn new_with_fingerprint(
         key: impl AsRef<[u8]>,
         server_name: ServerName,
@@ -59,6 +67,7 @@ impl Client {
         }
     }
 
+    /// Handshake with a peer server of the connected `TcpStream`
     pub async fn connect(&self, mut stream: TcpStream) -> io::Result<SnowyStream> {
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)

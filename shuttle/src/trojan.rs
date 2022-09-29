@@ -1,8 +1,8 @@
 //! The Trojan-like protocol with leading password and CRLF omitted, for communication between
 //! the client and server of noisy shuttle
 //!
-//! Ref: [https://trojan-gfw.github.io/trojan/protocol.html]
-//!      [https://github.com/trojan-gfw/trojan/tree/master/src/proto]
+//! Ref: <https://trojan-gfw.github.io/trojan/protocol.html>
+//!      <https://github.com/trojan-gfw/trojan/tree/master/src/proto>
 //!
 //! # Valid noisy-shuttle protocol
 //!
@@ -33,6 +33,17 @@
 //!     o  DST.ADDR desired destination address
 //!     o  DST.PORT desired destination port in network octet order
 //! ```
+//! More information on SOCKS5 requests can be found [here](https://tools.ietf.org/html/rfc1928).
+//!
+//! If the connection is a UDP ASSOCIATE, then each UDP packet has the following format:
+//! ```text
+//! +------+----------+----------+--------+---------+----------+
+//! | ATYP | DST.ADDR | DST.PORT | Length |  CRLF   | Payload  |
+//! +------+----------+----------+--------+---------+----------+
+//! |  1   | Variable |    2     |   2    | X'0D0A' | Variable |
+//! +------+----------+----------+--------+---------+----------+
+//! ```
+
 use async_trait::async_trait;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
@@ -187,7 +198,8 @@ pub async fn read_trojan_like_request(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> io::Result<TrojanLikeRequest> {
     let t = stream.read_u8().await?;
-    let cmd = Cmd::from_u8(t).expect("TODO"); //.ok_or(|e|io::Error::new(io::ErrorKind::Other, "client request unspported command"))?;
+    let cmd = Cmd::from_u8(t)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "client request unspported command"))?;
 
     let addr = Addr::read(&mut stream).await.map_err(|e| e.to_io_err())?;
     if stream.read_u16().await? != CRLF {

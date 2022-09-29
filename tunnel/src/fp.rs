@@ -17,11 +17,11 @@ use std::collections::HashMap;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
-use crate::try_assign;
+use crate::utils::try_assign;
 
 const RFC7685_PADDING_TARGET: usize = 512;
 
-/// TLS ClientHello fingerprints
+/// Spec of fingerprints instructing how TLS ClientHello messages are mutated
 #[derive(Clone, Default)]
 pub struct FingerprintSpec {
     pub ja3: Option<Ja3>,

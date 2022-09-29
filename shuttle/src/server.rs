@@ -28,6 +28,7 @@ pub async fn run_server(opt: SvrOpt) -> Result<()> {
     let listener = TcpListener::bind(opt.listen_addr)
         .await
         .with_context(|| format!("Failed to listen on local addr: {:?}", opt.listen_addr))?;
+
     while let Ok((inbound, client_addr)) = listener.accept().await {
         debug!("accepting connection from {}", &client_addr);
         let server = server.clone();
@@ -60,6 +61,7 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
                 .await
                 .context("failed to read request header")?;
             info!(command=?req.cmd, dest_addr=%req.dest_addr, "accepting request");
+
             match req.cmd {
                 Connect => {
                     let mut outbound = call_with_addr!(TcpStream::connect, req.dest_addr)
@@ -101,9 +103,8 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
                         mut outbound,
                     } => {
                         warn!(
-                            "invalid server hello received from {} when handling {}",
-                            outbound.peer_addr()?.to_string(),
-                            &client_addr
+                            remote=%outbound.peer_addr()?,
+                            "invalid server hello received",
                         );
                         // an invalid ServerHello might be the result of a strange ClientHello fabricated by
                         // a malicious client, so just copy_bidi as usual in this case
@@ -129,6 +130,7 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
                         info!("fallback relay (unauthenticated)");
                         let mut b = TcpStream::connect(&opt.camouflage_addr).await?;
                         b.write_all(&buf).await?;
+                        // TODO: throttle somehow to avoid be abused?
                         tokio::io::copy_bidirectional(&mut io, &mut b).await
                     }
                     ClientHelloInvalid { buf, mut io } => {
@@ -159,12 +161,14 @@ async fn relay_udp(
     inbound: &mut SnowyStream,
     outbound: &mut UdpSocket,
 ) -> io::Result<(usize, usize)> {
-    let _client_addr = inbound.as_inner().peer_addr()?;
     // SnowyStream buffers read internally but not write.
     // Every write to SnowyStream results in a standalone TLS frame, while TrojanLikeUdpDatagram
     // may write multiple times per packet. So buffer it to avoid packet structure leakage.
     let (mut inr, inw) = tokio::io::split(inbound);
     let mut inw = BufWriter::new(inw);
+    // Unlike in a TCP relay where remote endpoint is connected, UDP packet may send to arbitrary
+    // addresses. We maintain an address resolution cache in case the traffic of a single
+    // application-layer connection gets routed to different resolved addresses.
     // TODO: serious global resolver
     let mut resolved_addrs: LruCache<(String, u16), SocketAddr> =
         LruCache::new(MAX_CACHED_DOMAIN_ADDRS_PER_SOCKET);
@@ -175,7 +179,7 @@ async fn relay_udp(
         loop {
             let (n, dest_addr) = match inr.recv_from(&mut buf).await? {
                 Some(inner) => inner,
-                None => return Ok(()),
+                None => return Ok(()), // EoF
             };
             trace!(%dest_addr, len = n, "sending a UDP packet");
             match dest_addr {

@@ -248,7 +248,6 @@ pub fn possibly_insecure_hash_with_key(key: impl AsRef<[u8]>, msg: impl AsRef<[u
     h.finalize().into()
 }
 
-#[macro_export]
 macro_rules! try_assign {
     ($left: expr, $right: expr) => {
         if let Some(v) = $right {
@@ -256,3 +255,4 @@ macro_rules! try_assign {
         }
     };
 }
+pub(crate) use try_assign;

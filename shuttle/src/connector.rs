@@ -20,11 +20,22 @@ pub const PREFLIHGTER_CONNIDLE: usize = 120;
 /// Coefficient for computing the exponential moving average of handshake time
 pub const PREFLIHGTER_EMA_COEFF: f32 = 1.0 / 3.0;
 
+/// Generic connector that establish a connection to peer server
 #[async_trait]
 pub trait Connector {
     async fn connect(&self) -> io::Result<SnowyStream>;
 }
 
+/// Connector that establish connections in advance based on some simple heuristic predications
+///
+/// A preflighter starts with a queue at its lower bound capacity, which is then filled with
+/// pending connections still in progress.
+/// It tracks handshake time of connection establishment by calculating a moving average. When a
+/// connection is requested, it pops a connection from the queue and accumulate the delay before
+/// the connection is actually ready.
+///
+/// If the accumulated delay exceeds an average handshake time, the queue size is increased by one.
+/// If a connection is unused after `PREFLIHGTER_CONNIDLE`, the queue size is decreased by one.
 #[derive(Debug)]
 pub struct Preflighter {
     queue: Arc<Queue<(JoinHandle<io::Result<SnowyStream>>, Instant)>>,
@@ -100,7 +111,7 @@ impl Preflighter {
         }
     }
 
-    // #[instrument(level = "trace")]
+    /// Get a (hopefully) established connection
     pub async fn get(&self) -> io::Result<(SnowyStream, Instant)> {
         let mut errcnt = 0;
         loop {
@@ -151,7 +162,7 @@ impl Preflighter {
                     return Ok((s, t1));
                 }
                 Err(e) => {
-                    // warn!("preflighter got error when handshaking: {}", e);
+                    debug!("preflighter got error when handshaking: {}", e);
                     errcnt += 1;
                     if errcnt == self.queue.capacity() {
                         return Err(e);
@@ -175,6 +186,7 @@ impl Connector for Preflighter {
     }
 }
 
+/// Ad-hoc connector
 pub struct AdHocConnector {
     client: Client,
     remote_addr: String,
