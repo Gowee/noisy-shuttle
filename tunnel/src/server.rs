@@ -12,9 +12,7 @@ use std::mem;
 use std::net::SocketAddr;
 use std::sync::Mutex;
 
-use super::common::{SnowyStream, NOISE_PARAMS, PSKLEN};
-
-use crate::common::derive_psk;
+use crate::common::{derive_psk, SnowyStream, NOISE_PARAMS, PSKLEN};
 use crate::totp::Totp;
 use crate::utils::{
     get_client_tls_versions, get_server_tls_version, parse_tls_plain_message, read_tls_message,

@@ -57,7 +57,7 @@ The client would serve a SOCKS5/HTTP (adaptive) proxy at `listen_addr`.
 
 `sni` should match `camouflage_addr` specified server-side.
 
-**Or optionally specifying TLS fingerprint ([chrome](https://tlsfingerprint.io/id/e47eae8f8c4887b6)):**
+**Or optionally specifying a TLS fingerprint ([chrome](https://tlsfingerprint.io/id/e47eae8f8c4887b6)):**
 ```sh
 ./noisy-shuttle client 127.0.0.1:1080 server.addr.example:443 www.example.com Teap0taa --tls-ja3 769,2570-4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,2570-0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-2570-21,2570-29-23-24,0 --tls-alpn h2,http/1.1 --tls-sigalgos 1027,2052,1025,1283,2053,1281,2054,1537 --tls-versions 2570,772,771 --tls-keyshare 2570
 ```
