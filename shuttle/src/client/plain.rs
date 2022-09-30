@@ -154,7 +154,7 @@ async fn handle_connection_http(
 ) -> Result<()> {
     const HTTP_200_CONNECTION_ESTABLISHED: &[u8] =
         b"HTTP/1.1 200 Connection Established\r\nX-Powered-By: noisy-shuttle\r\n\r\n";
-    const HTTP_400_BAD_REQUEST: &[u8] = b"HTTP/400 Bad Request\r\n\r\n<html><h1>Not Proxied Request</h1>Powered by noisy-shuttle</html>";
+    const HTTP_400_BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n<html><h1>Not Proxied Request</h1>Powered by noisy-shuttle</html>";
     const HTTP_405_METHOD_NOT_ALLOWED: &[u8] = b"HTTP/1.1 405 Method Not Allowed\r\n\r\n<html><h1>Method Not Allowed</h1>Powered by noisy-shuttle</html>";
 
     use httparse::{Request, Status};
