@@ -932,7 +932,6 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.20.6"
-source = "git+https://github.com/gowee/rustls-patched.git#d95c7e7d9ef8d978604763d3c523bf0d832eae44"
 dependencies = [
  "log",
  "ring",
@@ -1098,6 +1097,7 @@ dependencies = [
  "lazy_static",
  "lru",
  "rand",
+ "ring",
  "rustls",
  "snow",
  "tokio",

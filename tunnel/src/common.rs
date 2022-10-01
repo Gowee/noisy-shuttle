@@ -25,6 +25,7 @@ pub const MAXIMUM_CIPHERTEXT_LENGTH: usize = 2usize.pow(14); // 2**14 B = 16 KiB
 pub const AEAD_TAG_LENGTH: usize = 16; // show::constants::TAGLEN
 pub const MAXIMUM_PLAINTEXT_LENGTH: usize = MAXIMUM_CIPHERTEXT_LENGTH - AEAD_TAG_LENGTH;
 pub const PSKLEN: usize = 32; // snow::constants::PSKLEN;
+pub const X25519_PUBKEY_LEN: usize = 32;
 
 pub const DEFAULT_ALPN_PROTOCOLS: [&[u8]; 2] = [b"http/2".as_slice(), b"http/1.1".as_slice()];
 

@@ -1,7 +1,7 @@
 use blake2::{Blake2s256, Digest};
 use rustls::internal::msgs::codec::Reader;
 use rustls::internal::msgs::handshake::{
-    ClientExtension, ClientHelloPayload, HandshakeMessagePayload, HandshakePayload,
+    ClientExtension, ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, KeyShareEntry,
     ServerExtension, ServerHelloPayload,
 };
 use rustls::internal::msgs::message::{Message, MessageError, MessagePayload, OpaqueMessage};
@@ -197,31 +197,64 @@ impl TlsMessageExt for Message {
     }
 }
 
-pub fn get_server_tls_version(shp: &ServerHelloPayload) -> Option<ProtocolVersion> {
-    shp.extensions
-        .iter()
-        .filter_map(|ext| {
-            if let ServerExtension::SupportedVersions(vers) = ext {
-                Some(vers)
-            } else {
-                None
-            }
-        })
-        .next()
-        .cloned()
+pub trait ServerHelloPayloadExt {
+    fn get_server_tls_version(&self) -> Option<&ProtocolVersion>;
+    fn get_keyshare(&self) -> Option<&KeyShareEntry>;
 }
 
-pub fn get_client_tls_versions(shp: &ClientHelloPayload) -> Option<&Vec<ProtocolVersion>> {
-    shp.extensions
-        .iter()
-        .filter_map(|ext| {
-            if let ClientExtension::SupportedVersions(vers) = ext {
-                Some(vers)
-            } else {
-                None
-            }
-        })
-        .next()
+impl ServerHelloPayloadExt for ServerHelloPayload {
+    fn get_server_tls_version(&self) -> Option<&ProtocolVersion> {
+        self.extensions
+            .iter()
+            .filter_map(|ext| {
+                if let ServerExtension::SupportedVersions(vers) = ext {
+                    Some(vers)
+                } else {
+                    None
+                }
+            })
+            .next()
+    }
+
+    fn get_keyshare(&self) -> Option<&KeyShareEntry> {
+        self.extensions
+            .iter()
+            .filter_map(|ext| match ext {
+                ServerExtension::KeyShare(ent) => Some(ent),
+                _ => None,
+            })
+            .next()
+    }
+}
+
+pub trait ClientHelloPayloadExt {
+    fn get_supported_versions(&self) -> Option<&Vec<ProtocolVersion>>;
+    fn get_keyshare(&self) -> Option<&Vec<KeyShareEntry>>;
+}
+
+impl ClientHelloPayloadExt for ClientHelloPayload {
+    fn get_supported_versions(&self) -> Option<&Vec<ProtocolVersion>> {
+        self.extensions
+            .iter()
+            .filter_map(|ext| {
+                if let ClientExtension::SupportedVersions(vers) = ext {
+                    Some(vers)
+                } else {
+                    None
+                }
+            })
+            .next()
+    }
+
+    fn get_keyshare(&self) -> Option<&Vec<KeyShareEntry>> {
+        self.extensions
+            .iter()
+            .filter_map(|ext| match ext {
+                ClientExtension::KeyShare(ents) => Some(ents),
+                _ => None,
+            })
+            .next()
+    }
 }
 
 // // https://stackoverflow.com/a/72461302/5488616

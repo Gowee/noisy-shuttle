@@ -1,7 +1,8 @@
+use ring::agreement::EphemeralPrivateKey;
 use rustls::internal::msgs::enums::ExtensionType;
 use rustls::{
     ClientConnection as RustlsClientConnection, ContentType as TlsContentType, HandshakeType,
-    ProtocolVersion, ServerName,
+    NamedGroup, ProtocolVersion, ServerName,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -12,14 +13,12 @@ use std::io;
 use std::mem::{self, MaybeUninit};
 use std::sync::Arc;
 
+use crate::ring_patch::EphemeralPrivateKeyDangerousExt;
 use crate::totp::Totp;
-use crate::utils::{parse_tls_plain_message, u16_from_be_slice};
+use crate::utils::{parse_tls_plain_message, u16_from_be_slice, ServerHelloPayloadExt};
 use crate::FingerprintSpec;
 
-use crate::utils::{
-    get_server_tls_version, read_tls_message, HandshakeStateExt, NoCertificateVerification,
-    TlsMessageExt,
-};
+use crate::utils::{read_tls_message, HandshakeStateExt, NoCertificateVerification, TlsMessageExt};
 
 use super::common::{
     derive_psk, SnowyStream, DEFAULT_ALPN_PROTOCOLS, MAXIMUM_CIPHERTEXT_LENGTH, NOISE_PARAMS,
@@ -69,21 +68,44 @@ impl Client {
 
     /// Handshake with a peer server of the connected `TcpStream`
     pub async fn connect(&self, mut stream: TcpStream) -> io::Result<SnowyStream> {
+        let builder = snow::Builder::new(NOISE_PARAMS.clone());
+        // generate the ephemeral key manually to have full control over it
+        let e = builder
+            .generate_keypair()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let kxkey = unsafe { EphemeralPrivateKey::x25519_from_bytes(&e.private) }.map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                "failed to convert Noise key to Ring key",
+            )
+        })?;
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
+            .fixed_ephemeral_key_for_testing_only(&e.private)
             .build_initiator()
             .expect("Noise params valid");
+        // EphemeralPrivateKey::generate(alg, rng)
+        // the orthodox usage has no way to get the private key of e
+        // let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
+        //     .psk(0, &self.key)
+        //     .build_initiator()
+        //     .expect("Noise params valid");
+
         // Noise: -> psk, e
         let psk_e = initiator.writen::<48>().expect("Noise state valid");
-        let random = <[u8; 32]>::try_from(&psk_e[0..32]).unwrap();
-        let mut session_id = [0u8; 32];
-        session_id[..16].copy_from_slice(&psk_e[32..48]);
-        session_id[16..].copy_from_slice(&self.totp.sign_current::<16>(&psk_e[0..32])); // timesig
+        debug_assert_eq!(&psk_e[0..32], &e.public);
+        let mut random = [0u8; 32];
+        random[0..16].copy_from_slice(&psk_e[32..48]);
+        random[16..32].copy_from_slice(&self.totp.sign_current::<16>(&psk_e[0..32]));
+        // let random = <[u8; 32]>::try_from(&psk_e[0..32]).unwrap();
+        // let mut session_id = [0u8; 32];
+        // session_id[..16].copy_from_slice(&psk_e[32..48]);
+        // session_id[16..].copy_from_slice(&self.totp.sign_current::<16>(&psk_e[0..32])); // timesig
         trace!(
             "noise ping to {:?}, psk_e {:x?}, timesig: {:x?}",
             &stream,
             psk_e,
-            &session_id[16..]
+            &random[16..]
         );
 
         let chwriter = self
@@ -114,7 +136,8 @@ impl Client {
             Arc::new(tlsconf.clone()),
             self.server_name.clone(),
             random.into(),
-            session_id.as_slice().into(),
+            None,
+            Some((NamedGroup::X25519, kxkey)),
             chwriter,
         )
         .expect("TLS config valid");
@@ -142,7 +165,7 @@ impl Client {
             })?;
 
         // server negotiated TLS version
-        match get_server_tls_version(&shp) {
+        match shp.get_server_tls_version() {
             Some(ProtocolVersion::TLSv1_3) => {
                 // TLS 1.3: handshake treated as done
                 // In TLS 1.3, all messages after client/server hello are encrypted by the session

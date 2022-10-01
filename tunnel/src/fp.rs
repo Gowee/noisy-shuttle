@@ -127,6 +127,10 @@ impl Debug for FingerprintSpec {
         }
         d.finish()
     }
+
+    // fn get_alpn(&self) -> Option<[Vec<u8>]> {
+
+    // }
 }
 
 /// Apply a JA3 fingerprint to a ClientHello [`Message`].

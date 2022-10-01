@@ -1,5 +1,6 @@
 use lru::LruCache;
 use rand::{thread_rng, Rng};
+use rustls::NamedGroup;
 use rustls::{HandshakeType, ProtocolVersion};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
@@ -12,11 +13,11 @@ use std::mem;
 use std::net::SocketAddr;
 use std::sync::Mutex;
 
-use crate::common::{derive_psk, SnowyStream, NOISE_PARAMS, PSKLEN};
+use crate::common::{derive_psk, SnowyStream, NOISE_PARAMS, PSKLEN, X25519_PUBKEY_LEN};
 use crate::totp::Totp;
 use crate::utils::{
-    get_client_tls_versions, get_server_tls_version, parse_tls_plain_message, read_tls_message,
-    u16_from_be_slice, TlsMessageExt,
+    parse_tls_plain_message, read_tls_message, u16_from_be_slice, ClientHelloPayloadExt,
+    ServerHelloPayloadExt, TlsMessageExt,
 };
 
 /// Server with config to establish snowy tunnels with peer clients
@@ -83,12 +84,31 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
             .and_then(|msg| msg.into_client_hello_payload())
         {
             Some(chp) => {
-                chp.random.write_slice(&mut psk_e[..32]); // client random
-                let s: (usize, [u8; 32]) = chp.session_id.into();
-                psk_e[32..].copy_from_slice(&s.1[..16]); // session id
-                timesig.copy_from_slice(&s.1[16..32]);
+                let kxkey = match chp.get_keyshare_extension().and_then(|ents| {
+                    ents.iter().find(|ent| {
+                        ent.group == NamedGroup::X25519 && ent.payload.0.len() == X25519_PUBKEY_LEN
+                    })
+                }) {
+                    Some(ent) => &ent.payload.0,
+                    None => {
+                        debug!(
+                            "faile to extract X25519 pub key from KeyShare of ClientHello by {}",
+                            inbound.peer_addr().unwrap()
+                        );
+                        return Err(ClientHelloInvalid { buf, io: inbound });
+                    }
+                };
+                // chp.random.write_slice(&mut psk_e[..32]); // client random
+                // let s: (usize, [u8; 32]) = chp.session_id.into();
+                // psk_e[32..].copy_from_slice(&s.1[..16]); // session id
+                // timesig.copy_from_slice(&s.1[16..32]);
+                psk_e[..32].copy_from_slice(kxkey);
+                psk_e[32..].copy_from_slice(&chp.random.0[..16]);
+                timesig.copy_from_slice(&chp.random.0[16..32]);
+                dbg!(psk_e);
 
-                let client_tls1_3 = get_client_tls_versions(&chp)
+                let client_tls1_3 = chp
+                    .get_versions_extension()
                     .map(|vers| vers.iter().any(|&ver| ver == ProtocolVersion::TLSv1_3))
                     .unwrap_or(false);
                 trace!(
@@ -151,7 +171,7 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
         };
         // forward camouflage server hello back to client
         inbound.write_all(&buf).await?;
-        match get_server_tls_version(&shp) {
+        match shp.get_server_tls_version() {
             Some(ProtocolVersion::TLSv1_3) => {
                 // TLS 1.3: handshake done
                 debug!(
