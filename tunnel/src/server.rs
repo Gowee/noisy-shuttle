@@ -2,7 +2,7 @@ use lru::LruCache;
 use rand::{thread_rng, Rng};
 use rustls::NamedGroup;
 use rustls::{HandshakeType, ProtocolVersion};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tracing::{debug, trace};
@@ -17,7 +17,7 @@ use crate::common::{derive_psk, SnowyStream, NOISE_PARAMS, PSKLEN, X25519_PUBKEY
 use crate::totp::Totp;
 use crate::utils::{
     parse_tls_plain_message, read_tls_message, u16_from_be_slice, ClientHelloPayloadExt,
-    ServerHelloPayloadExt, TlsMessageExt,
+    ServerHelloPayloadExt, TlsMessageExt, vec_uninit,
 };
 
 /// Server with config to establish snowy tunnels with peer clients
@@ -105,7 +105,6 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
                 psk_e[..32].copy_from_slice(kxkey);
                 psk_e[32..].copy_from_slice(&chp.random.0[..16]);
                 timesig.copy_from_slice(&chp.random.0[16..32]);
-                dbg!(psk_e);
 
                 let client_tls1_3 = chp
                     .get_versions_extension()
@@ -249,6 +248,26 @@ impl From<io::Error> for AcceptError {
         Self::IoError(err)
     }
 }
+
+async fn copy_until_tls12_client_change_key(
+    inbound: &mut TcpStream,
+    outbound: &mut TcpStream,
+) -> io::Result<()> {
+    let bufi = unsafe {vec_uninit(2048) };
+    let bufo = unsafe {vec_uninit(2048)};
+    loop {
+        tokio::select! {
+            ri = inbound.read_exact(&mut bufi) => {
+                
+            }, 
+            ro = outbound.read(&mut bufo) = {
+
+            }
+    };
+}
+    Ok(())
+}
+
 
 // Adapted from: https://github.com/ihciah/shadow-tls/blob/2bbdc26cff1120ba9c8eded39ad743c4c4f687c4/src/protocol.rs#L138
 async fn copy_until_tls12_handshake_finished<'a>(

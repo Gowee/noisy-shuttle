@@ -289,3 +289,9 @@ macro_rules! try_assign {
     };
 }
 pub(crate) use try_assign;
+
+pub unsafe fn vec_uninit<T>(len: usize) -> Vec<T> {
+    let mut buf: Vec<MaybeUninit<u8>> = Vec::with_capacity(len);
+    buf.set_len(len);
+    mem::transmute(buf)
+}

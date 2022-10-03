@@ -79,6 +79,7 @@ impl Client {
                 "failed to convert Noise key to Ring key",
             )
         })?;
+        let kxkey = (NamedGroup::X25519, kxkey);
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
             .fixed_ephemeral_key_for_testing_only(&e.private)
@@ -132,12 +133,28 @@ impl Client {
                     .unwrap_or_else(|| Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from)));
             }
         }
+        // Noise pub key would be re-used as the key of TLS KeyShare only if KeyShare is activated.
+        // Otherwise, Noise pub key is re-used as the key in ClientKeyExchange.
+        let noise_as_keyshare = tlsconf.supports_version(ProtocolVersion::TLSv1_3)
+            && self.fingerprint_spec.may_use_keyshare_curve(kxkey.0);
+        let (fixed_kskey, fixed_kxkey) = if noise_as_keyshare {
+            trace!("use Noise key as KeyShare key for {:?}", stream);
+            (Some(kxkey), None)
+        } else {
+            // The caller should ensure fpspec drop TLS 1.3. Otherwise, there would be no way to 
+            // send Noise pub key when TLS1.3 is negeotiated and KeyShare is unset
+            // (ClientHello retry is not supported yet).
+            trace!("use Noise key as ClientKeyExchange key for {:?}", stream);
+            (None, Some(kxkey))
+        };
+
         let mut tlsconn = rustls::ClientConnection::new_with(
             Arc::new(tlsconf.clone()),
             self.server_name.clone(),
             random.into(),
             None,
-            Some((NamedGroup::X25519, kxkey)),
+            fixed_kskey,
+            fixed_kxkey,
             chwriter,
         )
         .expect("TLS config valid");

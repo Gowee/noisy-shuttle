@@ -1096,6 +1096,7 @@ dependencies = [
  "ja3-rustls",
  "lazy_static",
  "lru",
+ "once_cell",
  "rand",
  "ring",
  "rustls",

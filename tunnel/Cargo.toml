@@ -19,3 +19,4 @@ lru = "0.7"
 ja3-rustls = { version = "0.0", git = "https://github.com/gowee/ja3-rustls.git", features = ["rand"] }
 itertools = "0.10"
 ring = { version = "*", features = [] }
+once_cell = "1.15"

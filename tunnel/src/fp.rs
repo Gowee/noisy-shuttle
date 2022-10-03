@@ -9,7 +9,7 @@ use rustls::internal::msgs::handshake::{
     KeyShareEntry, ProtocolNameList, UnknownExtension,
 };
 use rustls::internal::msgs::message::{Message, MessagePayload};
-use rustls::{ProtocolVersion, SignatureScheme};
+use rustls::{NamedGroup, ProtocolVersion, SignatureScheme};
 
 use tracing::{debug, trace, warn};
 
@@ -79,6 +79,52 @@ impl FingerprintSpec {
                 drop_extensions_not_in_ja3,
             )
         })
+    }
+
+    /// Check whether the spec may accept a specific TLS version when used to overwrite
+    /// [`ClientHello`]
+    ///
+    /// Even when `true`, the support of the version may be up to a `ClientHello`.
+    /// When `false`, the version must not be supported.
+    pub fn may_support_version(&self, ver: ProtocolVersion) -> bool {
+        if let Some(ref ja3) = self.ja3 {
+            if ja3.version == ver.get_u16() {
+                // must support
+                return true;
+            }
+            if !ja3
+                .extensions_as_typed()
+                .contains(&ExtensionType::SupportedVersions)
+            {
+                // must not support
+                return false;
+            }
+        }
+        if let Some(ref vers) = self.supported_versions {
+            // must or must not support
+            vers.contains(&ver.get_u16())
+        } else {
+            true // may support
+        }
+    }
+
+    pub fn may_use_keyshare_curve(&self, curve: NamedGroup) -> bool {
+        if let Some(ref ja3) = self.ja3 {
+            if !ja3.extensions_as_typed().contains(&ExtensionType::KeyShare) {
+                // must not
+                return false;
+            }
+        }
+        match self.keyshare_curves {
+            Some(ref curves) => {
+                // must or must not
+                curves.contains(&curve.get_u16())
+            }
+            None => {
+                // may
+                true
+            }
+        }
     }
 }
 
