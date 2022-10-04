@@ -57,7 +57,6 @@ pub struct CltOpt {
     // pub mux_pool_size_hint: usize,
 
     // pub mux_pool_size_hint: Option<usize>,
-
     /// Activate preflight, and specify the range of connections to establish in advance
     /// (shortening perceivable delay at risk of higher possibility of being distinguished)
     #[structopt(short ="p", long = "preflight", default_value = "0", parse(try_from_str = parse_preflight_bounds), group = "connecetor-mode")]

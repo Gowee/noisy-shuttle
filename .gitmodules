@@ -1,0 +1,3 @@
+[submodule "rustls-patched"]
+	path = rustls-patched
+	url = https://github.com/Gowee/rustls-patched.git
