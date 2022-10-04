@@ -30,3 +30,5 @@ derive_more = { version= "0.99.17", features = ["deref", "deref_mut"] }
 
 
 snowy-tunnel = { path = "../tunnel" }
+async-once-cell = "0.4.2"
+futures-util = "0.3.24"

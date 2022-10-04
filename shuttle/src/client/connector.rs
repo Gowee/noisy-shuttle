@@ -1,24 +1,20 @@
 use async_trait::async_trait;
 use deadqueue::resizable::Queue;
-use derive_more::{Deref, DerefMut};
-use priority_queue::PriorityQueue;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
-use tracing::{debug, trace, warn};
 
-use std::cmp::{self, PartialEq};
-use std::collections::{HashMap, VecDeque};
+use tracing::{debug, warn};
+
+use std::cmp::{self};
+use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use std::io;
-use std::net::SocketAddr;
-use std::ops::DerefMut;
-use std::pin::Pin;
+
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 
 use crate::utils::DurationExt;
 

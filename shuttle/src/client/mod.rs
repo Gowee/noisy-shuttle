@@ -11,7 +11,7 @@ mod muxpool;
 mod plain;
 // mod redir; // UNIMPLEMENTED
 
-use self::connector::{AdHocConnector, Preflighter, PREFLIHGTER_CONNIDLE, PREFLIHGTER_EMA_COEFF};
+use self::connector::{PREFLIHGTER_CONNIDLE, PREFLIHGTER_EMA_COEFF};
 use self::muxpool::YamuxConnector;
 use self::plain::serve as serve_plain;
 

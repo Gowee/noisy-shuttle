@@ -12,8 +12,6 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use snowy_tunnel::SnowyStream;
-
 use crate::trojan::{
     self, Cmd, TrojanLikeRequest, TrojanUdpDatagramReceiver, TrojanUdpDatagramSender,
     MAX_DATAGRAM_SIZE,

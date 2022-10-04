@@ -64,6 +64,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98161a4e3e2184da77bb14f02184cdd111e83bbbcc9979dfee3c44b9a85f5602"
 
 [[package]]
+name = "async-once-cell"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f61305cacf1d0c5c9d3ee283d22f8f1f8c743a18ceb44a1b102bd53476c141de"
+
+[[package]]
 name = "async-trait"
 version = "0.1.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -674,11 +680,13 @@ name = "noisy-shuttle"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "async-once-cell",
  "async-trait",
  "clap 3.2.22",
  "deadqueue",
  "derive_more",
  "futures",
+ "futures-util",
  "httparse",
  "ja3-rustls",
  "lru",

@@ -48,9 +48,19 @@ pub struct CltOpt {
     #[structopt(name = "KEY")]
     pub key: String,
 
-    /// Number or range of connections to establish in advance (shortening perceivable delay at
-    /// risk of higher possibility of being distinguished)
-    #[structopt(short ="p", long = "preflight", default_value = "0", parse(try_from_str = parse_preflight_bounds))]
+    /// Activate multiplex and specify the maximum number of stream per TCP connection  
+    #[structopt(short = "x", long = "mux", group = "connecetor-mode")]
+    pub mux: Option<usize>,
+
+    // /// Size hint of multiplex connection pool
+    // #[structopt(long = "mux_pool_size_hint", default_value = "0")]
+    // pub mux_pool_size_hint: usize,
+
+    // pub mux_pool_size_hint: Option<usize>,
+
+    /// Activate preflight, and specify the range of connections to establish in advance
+    /// (shortening perceivable delay at risk of higher possibility of being distinguished)
+    #[structopt(short ="p", long = "preflight", default_value = "0", parse(try_from_str = parse_preflight_bounds), group = "connecetor-mode")]
     pub preflight: (usize, Option<usize>),
 
     // UNIMPLEMENTED
@@ -79,6 +89,10 @@ pub struct CltOpt {
     #[structopt(long = "tls-keyshare", name = "keyshare", parse(try_from_str = parse_u16_array))]
     pub tls_keyshare: Option<Array<u16>>,
 }
+
+// #[derive(Debug, Clone, StructOpt)]
+// pub struct MuxOpt {
+// }
 
 #[derive(Debug, Clone, StructOpt)]
 pub struct SvrOpt {

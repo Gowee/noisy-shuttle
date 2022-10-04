@@ -11,7 +11,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use snowy_tunnel::{Server, SnowyStream};
+use snowy_tunnel::Server;
 
 use crate::opt::SvrOpt;
 use crate::trojan::{
