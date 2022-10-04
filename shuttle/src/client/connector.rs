@@ -1,15 +1,24 @@
 use async_trait::async_trait;
 use deadqueue::resizable::Queue;
+use derive_more::{Deref, DerefMut};
+use priority_queue::PriorityQueue;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{debug, warn};
+use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
+use tracing::{debug, trace, warn};
 
-use std::cmp;
-use std::collections::VecDeque;
+use std::cmp::{self, PartialEq};
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
 use std::io;
+use std::net::SocketAddr;
+use std::ops::DerefMut;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use crate::utils::DurationExt;
 
@@ -22,8 +31,8 @@ pub const PREFLIHGTER_EMA_COEFF: f32 = 1.0 / 3.0;
 
 /// Generic connector that establish a connection to peer server
 #[async_trait]
-pub trait Connector {
-    async fn connect(&self) -> io::Result<SnowyStream>;
+pub trait Connector<S: AsyncWrite + AsyncRead + Unpin> {
+    async fn connect(&self) -> io::Result<S>;
 }
 
 /// Connector that establish connections in advance based on some simple heuristic predications
@@ -174,7 +183,7 @@ impl Preflighter {
 }
 
 #[async_trait]
-impl Connector for Preflighter {
+impl Connector<SnowyStream> for Preflighter {
     async fn connect(&self) -> io::Result<SnowyStream> {
         let (s, t) = self.get().await?;
         debug!(
@@ -203,7 +212,7 @@ impl AdHocConnector {
 }
 
 #[async_trait]
-impl Connector for AdHocConnector {
+impl Connector<SnowyStream> for AdHocConnector {
     async fn connect(&self) -> io::Result<SnowyStream> {
         let t = Instant::now();
         let s = TcpStream::connect(self.remote_addr.as_str()).await?;

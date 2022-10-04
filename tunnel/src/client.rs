@@ -114,7 +114,9 @@ impl Client {
             Arc::new(tlsconf.clone()),
             self.server_name.clone(),
             random.into(),
-            session_id.as_slice().into(),
+            Some(session_id.as_slice().into()),
+            None,
+            None,
             chwriter,
         )
         .expect("TLS config valid");

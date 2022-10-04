@@ -7,9 +7,11 @@ edition = "2021"
 
 [dependencies]
 tokio = "1.21"
+tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"
 anyhow = "1.0"
 structopt = "0.3"
+structopt-flags = "0.3.6"
 clap = { version = "3.2" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [ "env-filter" ] }
@@ -22,7 +24,9 @@ num-traits = "0.2"
 num-derive = "0.3"
 socks5-protocol = { version = "0.3", features = ["sync"] }
 httparse = "1.8"
+yamux = "0.10"
+priority-queue = "1.2"
+derive_more = { version= "0.99.17", features = ["deref", "deref_mut"] }
+
 
 snowy-tunnel = { path = "../tunnel" }
-structopt-flags = "0.3.6"
-

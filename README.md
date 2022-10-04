@@ -3,7 +3,7 @@
 [![Build](https://github.com/Gowee/noisy-shuttle/actions/workflows/build.yml/badge.svg)](https://github.com/Gowee/noisy-shuttle/actions/workflows/build.yml)
 [![GitHub Release](https://img.shields.io/github/release/Gowee/noisy-shuttle.svg?style=flat)]()  
 
-noisy-shuttle establishes an AEAD-encrypted secure tunnel with forward secrecy for circumventing Internet censorship. It is designed  to be indistinguishable from TLS traffic with any chosen website for camouflage by copying authentic TLS handshake messages. 
+noisy-shuttle establishes an AEAD-encrypted secure tunnel with **forward secrecy** for circumventing Internet censorship. It is designed  to be indistinguishable from TLS traffic with any chosen website for camouflage by copying authentic TLS handshake messages. 
 
 A shuttle server authenticates clients based on tokens piggybacked by some fields of TLS ClientHello and falling back to dumb relay when authentication failed, preventing [active probing](https://gfw.report/blog/ss_advise/en/).
 

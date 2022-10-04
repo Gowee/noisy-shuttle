@@ -2,7 +2,7 @@ use anyhow::{anyhow, ensure, Context, Result};
 
 use socks5::sync::FromIO;
 use socks5_protocol as socks5;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::{timeout, Instant};
 use tracing::{debug, info, instrument, trace, warn};
@@ -23,9 +23,12 @@ use crate::utils::{extract_host_addr_from_url, url_to_relative, vec_uninit, Dura
 use super::connector::Connector;
 use super::{FIRST_PACKET_TIMEOUT, MAX_FIRST_PACKET_SIZE};
 
-pub async fn serve(
+pub async fn serve<
+    C: Connector<S> + 'static + Send + Sync,
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+>(
     listen_addr: SocketAddr,
-    connector: impl Connector + 'static + Send + Sync,
+    connector: C,
 ) -> Result<()> {
     let connector = Arc::new(connector);
     let listener = TcpListener::bind(listen_addr)
@@ -47,10 +50,10 @@ pub async fn serve(
 }
 
 // #[instrument(skip(connector), level = "trace")]
-async fn handle_connection(
+async fn handle_connection<C: Connector<S> + 'static, S: AsyncRead + AsyncWrite + Unpin + Send>(
     inbound: TcpStream,
     client_addr: SocketAddr,
-    connector: Arc<impl Connector + 'static>,
+    connector: Arc<C>,
 ) -> Result<()> {
     let mut first = [0u8];
     inbound.peek(&mut first).await?;
@@ -66,10 +69,13 @@ async fn handle_connection(
     // %local_in = inbound.local_addr().unwrap(),
 ))]
 #[inline(always)]
-async fn handle_connection_socks5(
+async fn handle_connection_socks5<
+    C: Connector<S> + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+>(
     mut inbound: TcpStream,
     client_addr: SocketAddr,
-    connector: Arc<impl Connector + 'static>,
+    connector: Arc<C>,
 ) -> Result<()> {
     const SOCKS5_CONNECT_SUCCEEDED: &[u8] =
         &[0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
@@ -147,10 +153,10 @@ async fn handle_connection_socks5(
     // %local_in = inbound.local_addr().unwrap(),
 ))]
 #[inline(always)]
-async fn handle_connection_http(
+async fn handle_connection_http<C: Connector<S> + 'static, S: AsyncRead + AsyncWrite + Unpin>(
     mut inbound: TcpStream,
     client_addr: SocketAddr,
-    connector: Arc<impl Connector + 'static>,
+    connector: Arc<C>,
 ) -> Result<()> {
     const HTTP_200_CONNECTION_ESTABLISHED: &[u8] =
         b"HTTP/1.1 200 Connection Established\r\nX-Powered-By: noisy-shuttle\r\n\r\n";
@@ -295,12 +301,12 @@ async fn handle_connection_http(
 
 // TODO: bullshit API design
 #[instrument(name = "tcp_relay", skip(inbound, outbound, outbuf), fields(
-    %local_out = outbound.as_inner().local_addr().unwrap(),
+    // %local_out = outbound.as_inner().local_addr().unwrap(), // FIX
     // %remote = outbound.as_inner().peer_addr().unwrap(),
 ))]
 async fn relay_tcp_with(
     mut inbound: &mut TcpStream,
-    mut outbound: &mut SnowyStream,
+    mut outbound: &mut (impl AsyncRead + AsyncWrite + Unpin),
     outbuf: Option<Vec<u8>>,
 ) -> Result<(u64, u64)> {
     debug!(outbuf_len = outbuf.as_ref().map(|b| b.len()), "starting");
@@ -337,15 +343,15 @@ async fn relay_tcp_with(
 }
 
 #[instrument(name = "udp_relay", skip(inbound_tcp, inbound, outbound, header), fields(
-    %client_udp_nominal = header.dest_addr,
-    %local_in_udp = inbound.local_addr().unwrap(),
-    %local_out = outbound.as_inner().local_addr().unwrap(),
+    // %client_udp_nominal = header.dest_addr,
+    // %local_in_udp = inbound.local_addr().unwrap(),
+    // %local_out = outbound.as_inner().local_addr().unwrap(), // FIX
     // %remote = outbound.as_inner().peer_addr().unwrap(),
 ))]
 async fn relay_udp_with(
     inbound_tcp: &mut TcpStream,
     inbound: &mut UdpSocket,
-    outbound: &mut SnowyStream,
+    outbound: &mut (impl AsyncRead + AsyncWrite + Unpin + Send),
     header: TrojanLikeRequest,
 ) -> Result<(u64, u64)> {
     debug!("starting");
