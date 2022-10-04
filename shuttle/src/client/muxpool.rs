@@ -11,10 +11,8 @@ use tracing::{debug, trace, warn};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io;
-
 use std::ops::DerefMut;
 use std::pin::Pin;
-
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 
@@ -184,14 +182,6 @@ impl Connector<MuxStream> for YamuxConnector {
                 let conn =
                     yamux::Connection::new(s.compat(), self.config.clone(), yamux::Mode::Client);
                 let control = conn.control();
-                // let id;
-                // {
-                //     let mut pool = self.acquire_pool();
-                //     id = pool.2;
-                //     pool.2 += 1;
-                //     pool.0.push(id, usize::MAX - 1);
-                //     pool.1.insert(id, create);
-                // }
                 let connpool = self.connpool.clone();
                 tokio::spawn(drive_yamux_connection(id, conn, connpool));
 
