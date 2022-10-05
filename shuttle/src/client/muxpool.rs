@@ -1,15 +1,15 @@
 use async_trait::async_trait;
-
-use futures_util::TryFutureExt;
+use futures_util::{StreamExt, TryFutureExt};
 use priority_queue::PriorityQueue;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
-use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
+
+use tokio_yamux::{Config, Control, Session, StreamHandle};
 use tracing::{debug, trace, warn};
 
 use std::collections::HashMap;
-use std::fmt::Debug;
+
 use std::io;
 use std::ops::DerefMut;
 use std::pin::Pin;
@@ -23,7 +23,7 @@ use snowy_tunnel::{Client, SnowyStream};
 /// Wrapper around `yamux::Stream` with a extra field to tracking the number of stream for a
 /// TCP connection
 pub struct MuxStream {
-    inner: yamux::Stream,
+    inner: StreamHandle,
     connid: ConnId,
     connpool: Arc<Mutex<ConnPool>>,
 }
@@ -34,8 +34,8 @@ impl AsyncRead for MuxStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let this = &mut self.deref_mut().inner;
-        Pin::new(&mut this.compat()).poll_read(cx, buf)
+        let mut this = &mut self.deref_mut().inner;
+        Pin::new(&mut this).poll_read(cx, buf)
     }
 }
 
@@ -45,18 +45,18 @@ impl AsyncWrite for MuxStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let this = &mut self.deref_mut().inner;
-        Pin::new(&mut this.compat()).poll_write(cx, buf)
+        let mut this = &mut self.deref_mut().inner;
+        Pin::new(&mut this).poll_write(cx, buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = &mut self.deref_mut().inner;
-        Pin::new(&mut this.compat()).poll_flush(cx)
+        let mut this = &mut self.deref_mut().inner;
+        Pin::new(&mut this).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = &mut self.deref_mut().inner;
-        Pin::new(&mut this.compat()).poll_shutdown(cx)
+        let mut this = &mut self.deref_mut().inner;
+        Pin::new(&mut this).poll_shutdown(cx)
     }
 }
 
@@ -84,26 +84,26 @@ pub type ConnId = usize;
 
 pub type ConnPool = (
     PriorityQueue<ConnId, usize>,
-    HashMap<ConnId, Arc<tokio::sync::Mutex<Option<io::Result<yamux::Control>>>>>,
+    HashMap<ConnId, Arc<tokio::sync::Mutex<Option<io::Result<Control>>>>>,
     ConnId,
 );
 
 /// Connector that multiplexs over TCP connections
-#[derive(Debug)]
+// #[derive(Debug)] // FIX:
 pub struct YamuxConnector {
     client: Client,
     remote_addr: String,
-    config: yamux::Config,
+    config: Config,
     connpool: Arc<Mutex<ConnPool>>,
     max_stream_per_conn: usize,
 }
 
 impl YamuxConnector {
     pub fn new(client: Client, remote_addr: String, max_stream_per_conn: usize) -> Self {
-        let mut config = yamux::Config::default();
+        let config = Config::default();
 
-        // SnowyStream is framing
-        config.set_split_send_size(usize::MAX);
+        // SnowyStream is framing internally
+        // config.set_split_send_size(usize::MAX);
         // .set_max_buffer_size(64 * 1024);
 
         YamuxConnector {
@@ -179,8 +179,7 @@ impl Connector<MuxStream> for YamuxConnector {
                     }
                 };
                 debug!(%id, "handshaked within {}", t.elapsed().autofmt());
-                let conn =
-                    yamux::Connection::new(s.compat(), self.config.clone(), yamux::Mode::Client);
+                let conn = Session::new_client(s, self.config);
                 let control = conn.control();
                 let connpool = self.connpool.clone();
                 tokio::spawn(drive_yamux_connection(id, conn, connpool));
@@ -228,20 +227,20 @@ impl Connector<MuxStream> for YamuxConnector {
 #[inline(always)]
 async fn drive_yamux_connection(
     id: ConnId,
-    mut conn: yamux::Connection<Compat<SnowyStream>>,
+    mut conn: Session<SnowyStream>,
     connpool: Arc<Mutex<ConnPool>>,
 ) {
     loop {
-        match conn.next_stream().await {
-            Ok(Some(stream)) => {
+        match conn.next().await {
+            Some(Ok(stream)) => {
                 warn!("dropping expected inbound multiplexing stream {:?}", stream)
             }
-            Ok(None) => {
-                debug!("multiplexing connection closed {:?}", conn);
+            None => {
+                debug!("multiplexing connection closed"); //, conn);
                 break;
             }
-            Err(error) => {
-                debug!(%error, "multiplexing connection {:?} terminated", conn);
+            Some(Err(error)) => {
+                debug!(%error, "multiplexing connection terminated"); //, conn);
                 break;
             }
         }

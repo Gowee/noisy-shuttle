@@ -11,7 +11,6 @@ use tracing::{debug, warn};
 use std::cmp::{self};
 use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::hash::Hasher;
 use std::io;
 
 use std::sync::{Arc, Mutex};

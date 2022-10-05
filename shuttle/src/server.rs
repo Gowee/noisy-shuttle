@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 
+use futures::StreamExt;
 use lru::LruCache;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::net::{lookup_host, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
-use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
+
+use tokio_yamux::{Session};
 use tracing::{debug, info, instrument, trace, warn};
 
 use std::fmt::Debug;
@@ -61,15 +63,11 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
     match server.accept(inbound).await {
         // Ok(snowys) => handle_trojan_like_stream(snowys).await, // FIX:
         Ok(snowys) => {
-            let mut conn =
-                yamux::Connection::new(snowys.compat(), Default::default(), yamux::Mode::Server);
-            while let Some(stream) = conn
-                .next_stream()
-                .await
-                .context("failed to retrieve next multiplexing stream")?
-            {
+            let mut conn = Session::new_server(snowys, Default::default());
+            while let Some(stream) = conn.next().await {
+                let stream = stream.context("failed to retrieve next multiplexing stream")?;
                 tokio::spawn(async move {
-                    if let Err(error) = handle_trojan_like_stream(stream.compat()).await {
+                    if let Err(error) = handle_trojan_like_stream(stream).await {
                         warn!(error = %format!("{:#}", error), "failed to serve {}", &client_addr)
                     }
                 });

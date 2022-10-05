@@ -700,6 +700,7 @@ dependencies = [
  "structopt-flags",
  "tokio",
  "tokio-util",
+ "tokio-yamux",
  "tracing",
  "tracing-subscriber",
  "yamux",
@@ -1356,6 +1357,21 @@ dependencies = [
  "futures-sink",
  "pin-project-lite",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "tokio-yamux"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49aa10f3b4be079ad4122ee643cb24e2396d09a3b8aba847e38cf5ade3e325f6"
+dependencies = [
+ "bytes",
+ "futures",
+ "log",
+ "nohash-hasher",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

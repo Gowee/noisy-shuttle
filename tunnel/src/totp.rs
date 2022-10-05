@@ -44,11 +44,16 @@ impl Totp {
         self.sign(system_now(), nonce)
     }
 
+    #[inline(always)]
     pub fn check<const N: usize>(&self, token: &[u8; N], time: u64) -> bool {
+        self.check_with(|t| t == token, time)
+    }
+
+    pub fn check_with<const N: usize>(&self, f: impl Fn(&[u8; N]) -> bool, time: u64) -> bool {
         let basestep = time / self.step - (self.skew as u64);
         for i in 0..=self.skew * 2 {
             let step_time = (basestep + (i as u64)) * (self.step as u64);
-            if &self.generate(step_time) == token {
+            if f(&self.generate(step_time)) {
                 return true;
             }
         }
@@ -58,6 +63,11 @@ impl Totp {
     #[inline(always)]
     pub fn check_current<const N: usize>(&self, token: &[u8; N]) -> bool {
         self.check(token, system_now())
+    }
+
+    #[inline(always)]
+    pub fn check_current_with<const N: usize>(&self, f: impl Fn(&[u8; N]) -> bool) -> bool {
+        self.check_with(f, system_now())
     }
 
     pub fn verify<const N: usize>(
