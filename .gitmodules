@@ -1,3 +1,6 @@
 [submodule "rustls-patched"]
 	path = rustls-patched
 	url = https://github.com/Gowee/rustls-patched.git
+[submodule "rust-yamux-opinionated"]
+	path = yamux-opinionated
+	url = https://github.com/Gowee/rust-yamux-opinionated

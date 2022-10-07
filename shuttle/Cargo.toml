@@ -24,11 +24,8 @@ num-traits = "0.2"
 num-derive = "0.3"
 socks5-protocol = { version = "0.3", features = ["sync"] }
 httparse = "1.8"
-yamux = "0.10"
+yamux = { version = "0.10", path = "../yamux-opinionated" }
 priority-queue = "1.2"
-derive_more = { version= "0.99.17", features = ["deref", "deref_mut"] }
-
+futures-util = "0.3.24"
 
 snowy-tunnel = { path = "../tunnel" }
-async-once-cell = "0.4.2"
-futures-util = "0.3.24"

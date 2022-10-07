@@ -51,7 +51,7 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     //         serve_plain(opt.listen_addr, preflighter).await?;
     //     }
     // };// FIX:
-    let connector = YamuxConnector::new(client, opt.remote_addr, 8);
+    let connector = YamuxConnector::new(client, opt.remote_addr, 128);
     serve_plain(opt.listen_addr, connector).await?;
     Ok(())
 }
