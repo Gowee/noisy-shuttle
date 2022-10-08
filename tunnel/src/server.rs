@@ -1,22 +1,23 @@
 use lru::LruCache;
 use rand::{thread_rng, Rng};
+use rustls::internal::msgs::message::PlainMessage;
 use rustls::{HandshakeType, ProtocolVersion};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{ReadHalf, WriteHalf};
+use tokio::io::AsyncWriteExt;
+
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tracing::{debug, trace};
 
 use std::fmt::Debug;
 use std::io;
-use std::mem;
+
 use std::net::SocketAddr;
 use std::sync::Mutex;
 
 use crate::common::{derive_psk, SnowyStream, NOISE_PARAMS, PSKLEN};
+use crate::rfc8998::generate_rfc8998_server_hello;
 use crate::totp::Totp;
 use crate::utils::{
-    get_client_tls_versions, get_server_tls_version, parse_tls_plain_message, read_tls_message,
-    u16_from_be_slice, TlsMessageExt,
+    get_client_tls_versions, parse_tls_plain_message, read_tls_message, TlsMessageExt,
 };
 
 /// Server with config to establish snowy tunnels with peer clients
@@ -75,6 +76,7 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
         // Noise: -> psk, e
         let mut psk_e = [0u8; 48];
         let mut timesig = [0u8; 16];
+        let session_id;
         match read_tls_message(&mut inbound, &mut buf)
             .await?
             .ok()
@@ -87,6 +89,7 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
                 let s: (usize, [u8; 32]) = chp.session_id.into();
                 psk_e[32..].copy_from_slice(&s.1[..16]); // session id
                 timesig.copy_from_slice(&s.1[16..32]);
+                session_id = s.1;
 
                 let client_tls1_3 = get_client_tls_versions(&chp)
                     .map(|vers| vers.iter().any(|&ver| ver == ProtocolVersion::TLSv1_3))
@@ -127,57 +130,69 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
             rf.put(e, inbound.peer_addr().unwrap());
         }
 
-        let mut outbound = TcpStream::connect(&self.camouflage_addr).await?;
+        // let mut outbound = TcpStream::connect(&self.camouflage_addr).await?;
 
-        // forward Client Hello in whole to camouflage server
-        outbound.write_all(&buf).await?;
+        // // forward Client Hello in whole to camouflage server
+        // outbound.write_all(&buf).await?;
 
-        // read camouflage Server Hello back
-        let shp = match read_tls_message(&mut outbound, &mut buf)
-            .await?
-            .ok()
-            .and_then(|_| parse_tls_plain_message(&buf).ok())
-            .filter(|msg| msg.is_handshake_type(HandshakeType::ServerHello))
-            .and_then(|msg| msg.into_server_hello_payload())
-        {
-            Some(shp) => shp,
-            None => {
-                return Err(ServerHelloInvalid {
-                    buf,
-                    inbound,
-                    outbound,
-                });
-            }
-        };
-        // forward camouflage server hello back to client
-        inbound.write_all(&buf).await?;
-        match get_server_tls_version(&shp) {
-            Some(ProtocolVersion::TLSv1_3) => {
-                // TLS 1.3: handshake done
-                debug!(
-                    "{} <-> {} negotiated TLS version: 1.3",
-                    inbound.peer_addr().unwrap(),
-                    outbound.peer_addr().unwrap()
-                );
-            }
-            _ => {
-                // TLS 1.2: continue handshake
-                debug!(
-                    "{} <-> {} negotiated TLS version: 1.2 or other",
-                    inbound.peer_addr().unwrap(),
-                    outbound.peer_addr().unwrap()
-                );
-                relay_until_tls12_handshake_finished(&mut inbound, &mut outbound).await?;
-                debug!(
-                    "{} <-> {} full handshake done",
-                    inbound.peer_addr().unwrap(),
-                    outbound.peer_addr().unwrap()
-                );
-            }
-        }
+        // // read camouflage Server Hello back
+        // let shp = match read_tls_message(&mut outbound, &mut buf)
+        //     .await?
+        //     .ok()
+        //     .and_then(|_| parse_tls_plain_message(&buf).ok())
+        //     .filter(|msg| msg.is_handshake_type(HandshakeType::ServerHello))
+        //     .and_then(|msg| msg.into_server_hello_payload())
+        // {
+        //     Some(shp) => shp,
+        //     None => {
+        //         return Err(ServerHelloInvalid {
+        //             buf,
+        //             inbound,
+        //             outbound,
+        //         });
+        //     }
+        // };
+        // // forward camouflage server hello back to client
+        // inbound.write_all(&buf).await?;
+        // match get_server_tls_version(&shp) {
+        //     Some(ProtocolVersion::TLSv1_3) => {
+        //         // TLS 1.3: handshake done
+        //         debug!(
+        //             "{} <-> {} negotiated TLS version: 1.3",
+        //             inbound.peer_addr().unwrap(),
+        //             outbound.peer_addr().unwrap()
+        //         );
+        //     }
+        //     _ => {
+        //         panic!("Unexpected TLS version negeotiated");
+        //         // // TLS 1.2: continue handshake
+        //         // debug!(
+        //         //     "{} <-> {} negotiated TLS version: 1.2 or other",
+        //         //     inbound.peer_addr().unwrap(),
+        //         //     outbound.peer_addr().unwrap()
+        //         // );
+        //         // relay_until_tls12_handshake_finished(&mut inbound, &mut outbound).await?;
+        //         // debug!(
+        //         //     "{} <-> {} full handshake done",
+        //         //     inbound.peer_addr().unwrap(),
+        //         //     outbound.peer_addr().unwrap()
+        //         // );
+        //     }
+        // }
 
-        // handshake done, drop connection to camouflage server
-        mem::drop(outbound);
+        // // handshake done, drop connection to camouflage server
+        // mem::drop(outbound);
+
+        // server_random is unused for now, just fill it with random
+        let mut server_random = [0u8; 32];
+        rand::thread_rng().fill(&mut server_random);
+        let mut sm2_point = vec![0u8; 64];
+        // no idea how to generate a valid point, just use random for now
+        rand::thread_rng().fill(sm2_point.as_mut_slice());
+        // per TLS 1.3 spec, echo session_id back
+        let sh = generate_rfc8998_server_hello(server_random, session_id, sm2_point);
+        let sh = PlainMessage::from(sh).into_unencrypted_opaque();
+        inbound.write_all(&sh.encode()).await?;
 
         // Noise: <- e, ee
         let mut pong = [0u8; 5 + 48 + 24]; // 0 - 24 random padding
@@ -230,65 +245,65 @@ impl From<io::Error> for AcceptError {
     }
 }
 
-// Adapted from: https://github.com/ihciah/shadow-tls/blob/2bbdc26cff1120ba9c8eded39ad743c4c4f687c4/src/protocol.rs#L138
-async fn copy_until_tls12_handshake_finished<'a>(
-    mut read_half: ReadHalf<'a>,
-    mut write_half: WriteHalf<'a>,
-) -> io::Result<()> {
-    const HANDSHAKE: u8 = 0x16;
-    const CHANGE_CIPHER_SPEC: u8 = 0x14;
-    // header_buf is used to read handshake frame header, will be a fixed size buffer.
-    let mut header_buf = [0u8; 5];
-    // data_buf is used to read and write data, and can be expanded.
-    let mut data_buf = vec![0u8; 2048];
-    let mut has_seen_change_cipher_spec = false;
+// // Adapted from: https://github.com/ihciah/shadow-tls/blob/2bbdc26cff1120ba9c8eded39ad743c4c4f687c4/src/protocol.rs#L138
+// async fn copy_until_tls12_handshake_finished<'a>(
+//     mut read_half: ReadHalf<'a>,
+//     mut write_half: WriteHalf<'a>,
+// ) -> io::Result<()> {
+//     const HANDSHAKE: u8 = 0x16;
+//     const CHANGE_CIPHER_SPEC: u8 = 0x14;
+//     // header_buf is used to read handshake frame header, will be a fixed size buffer.
+//     let mut header_buf = [0u8; 5];
+//     // data_buf is used to read and write data, and can be expanded.
+//     let mut data_buf = vec![0u8; 2048];
+//     let mut has_seen_change_cipher_spec = false;
 
-    loop {
-        // read exact 5 bytes
-        read_half.read_exact(&mut header_buf).await?;
+//     loop {
+//         // read exact 5 bytes
+//         read_half.read_exact(&mut header_buf).await?;
 
-        // parse length
-        let data_size = u16_from_be_slice(&header_buf[3..5]) as usize;
+//         // parse length
+//         let data_size = u16_from_be_slice(&header_buf[3..5]) as usize;
 
-        // copy header and that much data
-        write_half.write_all(&header_buf).await?;
-        if data_size > data_buf.len() {
-            data_buf.resize(data_size, 0);
-        }
-        read_half.read_exact(&mut data_buf[0..data_size]).await?;
-        write_half.write_all(&data_buf[0..data_size]).await?;
+//         // copy header and that much data
+//         write_half.write_all(&header_buf).await?;
+//         if data_size > data_buf.len() {
+//             data_buf.resize(data_size, 0);
+//         }
+//         read_half.read_exact(&mut data_buf[0..data_size]).await?;
+//         write_half.write_all(&data_buf[0..data_size]).await?;
 
-        // check header type
-        if header_buf[0] != HANDSHAKE {
-            if header_buf[0] != CHANGE_CIPHER_SPEC {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Invalid TLS state",
-                ));
-            }
-            if !has_seen_change_cipher_spec {
-                has_seen_change_cipher_spec = true;
-                continue;
-            }
-        }
-        if has_seen_change_cipher_spec {
-            break;
-        }
-    }
-    Ok(())
-}
+//         // check header type
+//         if header_buf[0] != HANDSHAKE {
+//             if header_buf[0] != CHANGE_CIPHER_SPEC {
+//                 return Err(io::Error::new(
+//                     io::ErrorKind::InvalidData,
+//                     "Invalid TLS state",
+//                 ));
+//             }
+//             if !has_seen_change_cipher_spec {
+//                 has_seen_change_cipher_spec = true;
+//                 continue;
+//             }
+//         }
+//         if has_seen_change_cipher_spec {
+//             break;
+//         }
+//     }
+//     Ok(())
+// }
 
-async fn relay_until_tls12_handshake_finished(
-    inbound: &mut TcpStream,
-    outbound: &mut TcpStream,
-) -> io::Result<()> {
-    let (rin, win) = inbound.split();
-    let (rout, wout) = outbound.split();
-    let (a, b) = tokio::join!(
-        copy_until_tls12_handshake_finished(rin, wout),
-        copy_until_tls12_handshake_finished(rout, win)
-    );
-    a?;
-    b?;
-    Ok(())
-}
+// async fn relay_until_tls12_handshake_finished(
+//     inbound: &mut TcpStream,
+//     outbound: &mut TcpStream,
+// ) -> io::Result<()> {
+//     let (rin, win) = inbound.split();
+//     let (rout, wout) = outbound.split();
+//     let (a, b) = tokio::join!(
+//         copy_until_tls12_handshake_finished(rin, wout),
+//         copy_until_tls12_handshake_finished(rout, win)
+//     );
+//     a?;
+//     b?;
+//     Ok(())
+// }

@@ -138,6 +138,7 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
                     }
                     ClientHelloInvalid { buf, mut io } => {
                         info!("fallback relay (client protocol unrecognized)");
+                        // dbg!(std::str::from_utf8(&buf));
                         let mut b = TcpStream::connect(&opt.camouflage_addr).await?;
                         b.write_all(&buf).await?;
                         tokio::io::copy_bidirectional(&mut io, &mut b).await

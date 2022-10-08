@@ -145,6 +145,7 @@ pub fn parse_tls_plain_message(buf: &[u8]) -> Result<Message, RustlsError> {
 
 pub trait TlsMessageExt {
     fn as_client_hello_payload_mut(&mut self) -> Option<&mut ClientHelloPayload>;
+    fn as_server_hello_payload_mut(&mut self) -> Option<&mut ServerHelloPayload>;
     fn into_client_hello_payload(self) -> Option<ClientHelloPayload>;
     fn into_server_hello_payload(self) -> Option<ServerHelloPayload>;
 }
@@ -175,6 +176,22 @@ impl TlsMessageExt for Message {
         } = self.payload
         {
             Some(chp)
+        } else {
+            None
+        }
+    }
+
+    fn as_server_hello_payload_mut(&mut self) -> Option<&mut ServerHelloPayload> {
+        if let MessagePayload::Handshake {
+            parsed:
+                HandshakeMessagePayload {
+                    payload: HandshakePayload::ServerHello(ref mut shp),
+                    ..
+                },
+            ..
+        } = self.payload
+        {
+            Some(shp)
         } else {
             None
         }

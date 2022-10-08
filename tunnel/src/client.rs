@@ -1,30 +1,24 @@
-use rustls::internal::msgs::enums::ExtensionType;
-use rustls::{
-    ClientConnection as RustlsClientConnection, ContentType as TlsContentType, HandshakeType,
-    ProtocolVersion, ServerName,
-};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use rand::Rng;
+
+use rustls::internal::msgs::message::PlainMessage;
+use rustls::{HandshakeType, ProtocolVersion, ServerName};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tracing::trace;
 use tracing::warn;
-use tracing::{debug, trace};
 
 use std::io;
-use std::mem::{self, MaybeUninit};
+
 use std::sync::Arc;
 
+use crate::rfc8998::generate_rfc8998_client_hello;
 use crate::totp::Totp;
-use crate::utils::{parse_tls_plain_message, u16_from_be_slice};
+use crate::utils::parse_tls_plain_message;
 use crate::FingerprintSpec;
 
-use crate::utils::{
-    get_server_tls_version, read_tls_message, HandshakeStateExt, NoCertificateVerification,
-    TlsMessageExt,
-};
+use crate::utils::{get_server_tls_version, read_tls_message, HandshakeStateExt, TlsMessageExt};
 
-use super::common::{
-    derive_psk, SnowyStream, DEFAULT_ALPN_PROTOCOLS, MAXIMUM_CIPHERTEXT_LENGTH, NOISE_PARAMS,
-    PSKLEN, TLS_RECORD_HEADER_LENGTH,
-};
+use super::common::{derive_psk, SnowyStream, NOISE_PARAMS, PSKLEN};
 
 /// Client with config to establish snowy tunnels with peer servers
 #[derive(Debug, Clone)]
@@ -86,48 +80,52 @@ impl Client {
             &session_id[16..]
         );
 
-        let chwriter = self
-            .fingerprint_spec
-            .get_client_hello_overwriter(true, true);
-        // TODO: option for verifying camouflage cert
-        let mut tlsconf = rustls::ClientConfig::builder()
-            .with_safe_defaults()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
-            .with_no_client_auth();
-        if let Some(ref ja3) = self.fingerprint_spec.ja3 {
-            // fingerprint_spec.alpn is effective iff alpn is set in ja3
-            if ja3
-                .extensions_as_typed()
-                .any(|ext| ext == ExtensionType::ALProtocolNegotiation)
-            {
-                // It is necessary to add it to conf. Only adding it to allowed_unsolicited_extensions
-                // resulted in TLS client rejection when ALPN is negeotiated.
-                tlsconf.alpn_protocols = self
-                    .fingerprint_spec
-                    .alpn
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from)));
-            }
-        }
-        let mut tlsconn = rustls::ClientConnection::new_with(
-            Arc::new(tlsconf.clone()),
-            self.server_name.clone(),
-            random.into(),
-            session_id.as_slice().into(),
-            chwriter,
-        )
-        .expect("TLS config valid");
-
-        let mut buf: Vec<MaybeUninit<u8>> =
-            Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
-        let mut buf: Vec<u8> = unsafe {
-            buf.set_len(buf.capacity());
-            mem::transmute(buf)
-        };
-        let len = tlsconn.write_tls(&mut io::Cursor::new(&mut buf))?; // Write for Vec is dummy?
-        unsafe { buf.set_len(len) };
-        debug_assert!(!tlsconn.wants_write() & tlsconn.wants_read());
+        // let chwriter = self
+        //     .fingerprint_spec
+        //     .get_client_hello_overwriter(true, true);
+        // // TODO: option for verifying camouflage cert
+        // let mut tlsconf = rustls::ClientConfig::builder()
+        //     .with_safe_defaults()
+        //     .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
+        //     .with_no_client_auth();
+        // if let Some(ref ja3) = self.fingerprint_spec.ja3 {
+        //     // fingerprint_spec.alpn is effective iff alpn is set in ja3
+        //     if ja3
+        //         .extensions_as_typed()
+        //         .any(|ext| ext == ExtensionType::ALProtocolNegotiation)
+        //     {
+        //         // It is necessary to add it to conf. Only adding it to allowed_unsolicited_extensions
+        //         // resulted in TLS client rejection when ALPN is negeotiated.
+        //         tlsconf.alpn_protocols = self
+        //             .fingerprint_spec
+        //             .alpn
+        //             .as_ref()
+        //             .cloned()
+        //             .unwrap_or_else(|| Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from)));
+        //     }
+        // }
+        // let mut tlsconn = rustls::ClientConnection::new_with(
+        //     Arc::new(tlsconf.clone()),
+        //     self.server_name.clone(),
+        //     random.into(),
+        //     session_id.as_slice().into(),
+        //     chwriter,
+        // )
+        // .expect("TLS config valid");
+        let mut sm2_point = vec![0u8; 65];
+        rand::thread_rng().fill(sm2_point.as_mut_slice());
+        let ch = generate_rfc8998_client_hello(random, session_id, sm2_point);
+        let ch = PlainMessage::from(ch).into_unencrypted_opaque();
+        // let mut buf: Vec<MaybeUninit<u8>> =
+        //     Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
+        // let mut buf: Vec<u8> = unsafe {
+        //     buf.set_len(buf.capacity());
+        //     mem::transmute(buf)
+        // };
+        // let len = tlsconn.write_tls(&mut io::Cursor::new(&mut buf))?; // Write for Vec is dummy?
+        // unsafe { buf.set_len(len) };
+        // debug_assert!(!tlsconn.wants_write() & tlsconn.wants_read());
+        let mut buf = ch.encode();
         stream.write_all(&buf).await?; // forward Client Hello
 
         // read Server Hello
@@ -156,14 +154,18 @@ impl Client {
                 //   in typical TLS 1.3 handshake.
             }
             _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Unexpected TLS version negeotiated",
+                ));
                 // TLS 1.2: conitnue full handshake via rustls
                 // In TLS 1.2, the handshake procedures are basically transparent. That is, an
                 // eavesdropper could verify the unencrypted signature against the camouflage
                 // servers' public key. So the camouflage server is requested every time.
 
                 // feed previously read Server Hello
-                tlsconn.read_tls(&mut io::Cursor::new(&mut buf))?;
-                tls12_handshake(&mut tlsconn, &mut stream, false).await?;
+                // tlsconn.read_tls(&mut io::Cursor::new(&mut buf))?;
+                // tls12_handshake(&mut tlsconn, &mut stream, false).await?;
                 // TLS1.2 handshake done
             }
         }
@@ -204,90 +206,90 @@ impl Client {
     }
 }
 
-async fn tls12_handshake(
-    tlsconn: &mut RustlsClientConnection,
-    stream: &mut TcpStream,
-    stop_after_server_ccs: bool,
-) -> io::Result<()> {
-    let mut buf: Vec<MaybeUninit<u8>> =
-        Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
-    let mut buf: Vec<u8> = unsafe {
-        buf.set_len(buf.capacity());
-        mem::transmute(buf)
-    };
-    let mut seen_ccs = false;
-    loop {
-        match (tlsconn.wants_read(), tlsconn.wants_write()) {
-            (_, true) => {
-                // flow: client -> server
-                // always prefer to write out over reading in, to avoid deadlock-like waiting
-                let len = tlsconn.write_tls(&mut io::Cursor::new(&mut buf)).unwrap();
-                // typically, multiple messages are written by a single call
-                trace!(
-                    first_protocol = u16_from_be_slice(&buf[1..3]),
-                    first_msglen = u16_from_be_slice(&buf[3..5]),
-                    totallen = len,
-                    "tls handshake {} => {}, first type: {:?}",
-                    stream.local_addr().unwrap(),
-                    stream.peer_addr().unwrap(),
-                    TlsContentType::from(buf[0]),
-                );
-                stream.write_all(&buf[..len]).await?;
-            }
-            (true, false) => {
-                // flow: client <- server
-                stream.read_exact(&mut buf[..5]).await?;
-                let len = u16_from_be_slice(&buf[3..5]) as usize;
-                stream.read_exact(&mut buf[5..5 + len]).await?;
-                trace!(
-                    protocol = u16_from_be_slice(&buf[1..3]),
-                    msglen = u16_from_be_slice(&buf[3..5]),
-                    "tls handshake {} <= {}, type: {:?}",
-                    stream.local_addr().unwrap(),
-                    stream.peer_addr().unwrap(),
-                    TlsContentType::from(buf[0]),
-                );
-                let n = tlsconn
-                    .read_tls(&mut io::Cursor::new(&mut buf[..5 + len]))
-                    .unwrap();
-                debug_assert_eq!(n, 5 + len);
-                tlsconn.process_new_packets().map_err(|e| {
-                    debug!(
-                        "tls state error when handshaking {} <-> {}: {:?}",
-                        stream.local_addr().unwrap(),
-                        stream.peer_addr().unwrap(),
-                        e
-                    );
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("TLS handshake state: {}", e),
-                    )
-                })?;
-                match TlsContentType::from(buf[0]) {
-                    TlsContentType::ChangeCipherSpec => {
-                        seen_ccs = true;
-                        // after server ChangeCipherSpec, the final Handshake Finished message is encrypted
-                        // so it can be used to carry other data
-                        if stop_after_server_ccs {
-                            break;
-                        }
-                    }
-                    _ => {
-                        debug_assert_eq!(buf[0], TlsContentType::Handshake.get_u8());
-                        // by default, handshake is done after the Handshake Finished message
-                        if seen_ccs {
-                            break;
-                        }
-                    }
-                }
-            }
-            (false, false) => break,
-        }
-    }
-    trace!(
-        "tls handshake {} <-> {} done",
-        stream.local_addr().unwrap(),
-        stream.peer_addr().unwrap(),
-    );
-    Ok(())
-}
+// async fn tls12_handshake(
+//     tlsconn: &mut RustlsClientConnection,
+//     stream: &mut TcpStream,
+//     stop_after_server_ccs: bool,
+// ) -> io::Result<()> {
+//     let mut buf: Vec<MaybeUninit<u8>> =
+//         Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
+//     let mut buf: Vec<u8> = unsafe {
+//         buf.set_len(buf.capacity());
+//         mem::transmute(buf)
+//     };
+//     let mut seen_ccs = false;
+//     loop {
+//         match (tlsconn.wants_read(), tlsconn.wants_write()) {
+//             (_, true) => {
+//                 // flow: client -> server
+//                 // always prefer to write out over reading in, to avoid deadlock-like waiting
+//                 let len = tlsconn.write_tls(&mut io::Cursor::new(&mut buf)).unwrap();
+//                 // typically, multiple messages are written by a single call
+//                 trace!(
+//                     first_protocol = u16_from_be_slice(&buf[1..3]),
+//                     first_msglen = u16_from_be_slice(&buf[3..5]),
+//                     totallen = len,
+//                     "tls handshake {} => {}, first type: {:?}",
+//                     stream.local_addr().unwrap(),
+//                     stream.peer_addr().unwrap(),
+//                     TlsContentType::from(buf[0]),
+//                 );
+//                 stream.write_all(&buf[..len]).await?;
+//             }
+//             (true, false) => {
+//                 // flow: client <- server
+//                 stream.read_exact(&mut buf[..5]).await?;
+//                 let len = u16_from_be_slice(&buf[3..5]) as usize;
+//                 stream.read_exact(&mut buf[5..5 + len]).await?;
+//                 trace!(
+//                     protocol = u16_from_be_slice(&buf[1..3]),
+//                     msglen = u16_from_be_slice(&buf[3..5]),
+//                     "tls handshake {} <= {}, type: {:?}",
+//                     stream.local_addr().unwrap(),
+//                     stream.peer_addr().unwrap(),
+//                     TlsContentType::from(buf[0]),
+//                 );
+//                 let n = tlsconn
+//                     .read_tls(&mut io::Cursor::new(&mut buf[..5 + len]))
+//                     .unwrap();
+//                 debug_assert_eq!(n, 5 + len);
+//                 tlsconn.process_new_packets().map_err(|e| {
+//                     debug!(
+//                         "tls state error when handshaking {} <-> {}: {:?}",
+//                         stream.local_addr().unwrap(),
+//                         stream.peer_addr().unwrap(),
+//                         e
+//                     );
+//                     io::Error::new(
+//                         io::ErrorKind::InvalidData,
+//                         format!("TLS handshake state: {}", e),
+//                     )
+//                 })?;
+//                 match TlsContentType::from(buf[0]) {
+//                     TlsContentType::ChangeCipherSpec => {
+//                         seen_ccs = true;
+//                         // after server ChangeCipherSpec, the final Handshake Finished message is encrypted
+//                         // so it can be used to carry other data
+//                         if stop_after_server_ccs {
+//                             break;
+//                         }
+//                     }
+//                     _ => {
+//                         debug_assert_eq!(buf[0], TlsContentType::Handshake.get_u8());
+//                         // by default, handshake is done after the Handshake Finished message
+//                         if seen_ccs {
+//                             break;
+//                         }
+//                     }
+//                 }
+//             }
+//             (false, false) => break,
+//         }
+//     }
+//     trace!(
+//         "tls handshake {} <-> {} done",
+//         stream.local_addr().unwrap(),
+//         stream.peer_addr().unwrap(),
+//     );
+//     Ok(())
+// }

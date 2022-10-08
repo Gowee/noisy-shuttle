@@ -1,18 +1,18 @@
-use ja3_rustls::{ConcatenatedParser, Ja3};
+// use ja3_rustls::{ConcatenatedParser};
 use structopt::clap::AppSettings::{ColoredHelp, DeriveDisplayOrder};
 use structopt::StructOpt;
 use structopt_flags::QuietVerbose;
 
 use std::fmt::Debug;
 use std::net::SocketAddr;
-use std::str::FromStr;
+// use std::str::FromStr;
 
-use snowy_tunnel::{Client, FingerprintSpec, Server};
+use snowy_tunnel::{Client, Server};
 
-type Array<T> = Vec<T>;
+// type Array<T> = Vec<T>;
 
 #[derive(Debug, Clone, StructOpt)]
-#[structopt(name = "noisy-shuttle", about = "Shuttle for the Internet", global_settings(&[ColoredHelp, DeriveDisplayOrder]))]
+#[structopt(name = "noisy-shuttle", about = "Shuttle for the Internet (RFC8998 edition)", global_settings(&[ColoredHelp, DeriveDisplayOrder]))]
 pub struct Opt {
     #[structopt(flatten)]
     pub verbose: QuietVerbose,
@@ -52,32 +52,31 @@ pub struct CltOpt {
     /// risk of higher possibility of being distinguished)
     #[structopt(short ="p", long = "preflight", default_value = "0", parse(try_from_str = parse_preflight_bounds))]
     pub preflight: (usize, Option<usize>),
+    // // UNIMPLEMENTED
+    // // /// Activate transparent proxy mode, instructing the client to accept raw REDIRECTed TCP
+    // // /// traffic and TPROXY-ed UDP traffic (plain proxy is disabled in this case)
+    // // #[cfg(unix)]
+    // // #[structopt(long = "redir")]
+    // // pub redir: bool,
+    // /// JA3 TLS fingerprint to apply to ClientHello (possbily resulted in handshake error due to unsupported algos negotiated)
+    // #[structopt(long = "tls-ja3", name = "ja3")]
+    // pub tls_ja3: Option<Ja3>,
 
-    // UNIMPLEMENTED
-    // /// Activate transparent proxy mode, instructing the client to accept raw REDIRECTed TCP
-    // /// traffic and TPROXY-ed UDP traffic (plain proxy is disabled in this case)
-    // #[cfg(unix)]
-    // #[structopt(long = "redir")]
-    // pub redir: bool,
-    /// JA3 TLS fingerprint to apply to ClientHello (possbily resulted in handshake error due to unsupported algos negotiated)
-    #[structopt(long = "tls-ja3", name = "ja3")]
-    pub tls_ja3: Option<Ja3>,
+    // /// ALPN to apply to ClientHello, in text, seperated by comma
+    // #[structopt(long = "tls-alpn", name = "alpn", parse(try_from_str = parse_alpn_array))]
+    // pub tls_alpn: Option<Array<Vec<u8>>>,
 
-    /// ALPN to apply to ClientHello, in text, seperated by comma
-    #[structopt(long = "tls-alpn", name = "alpn", parse(try_from_str = parse_alpn_array))]
-    pub tls_alpn: Option<Array<Vec<u8>>>,
+    // /// Signature algorithms to apply to ClientHello, in decimal, seperated by comma
+    // #[structopt(long = "tls-sigalgos", name = "signature algorithms", parse(try_from_str = parse_u16_array))]
+    // pub tls_sigalgos: Option<Array<u16>>,
 
-    /// Signature algorithms to apply to ClientHello, in decimal, seperated by comma
-    #[structopt(long = "tls-sigalgos", name = "signature algorithms", parse(try_from_str = parse_u16_array))]
-    pub tls_sigalgos: Option<Array<u16>>,
+    // // Supported TLS versions to apply to ClientHello, in decimal, seperated by comma
+    // #[structopt(long = "tls-versions", name = "supported versions", parse(try_from_str = parse_u16_array))]
+    // pub tls_versions: Option<Array<u16>>,
 
-    // Supported TLS versions to apply to ClientHello, in decimal, seperated by comma
-    #[structopt(long = "tls-versions", name = "supported versions", parse(try_from_str = parse_u16_array))]
-    pub tls_versions: Option<Array<u16>>,
-
-    /// Key Share curves to apply to ClientHello, seperated by comma (only X25519 and GREASE are allowed so far)
-    #[structopt(long = "tls-keyshare", name = "keyshare", parse(try_from_str = parse_u16_array))]
-    pub tls_keyshare: Option<Array<u16>>,
+    // /// Key Share curves to apply to ClientHello, seperated by comma (only X25519 and GREASE are allowed so far)
+    // #[structopt(long = "tls-keyshare", name = "keyshare", parse(try_from_str = parse_u16_array))]
+    // pub tls_keyshare: Option<Array<u16>>,
 }
 
 #[derive(Debug, Clone, StructOpt)]
@@ -100,21 +99,21 @@ pub struct SvrOpt {
 }
 
 impl CltOpt {
-    pub fn get_fingerprint_spec(&self) -> FingerprintSpec {
-        FingerprintSpec {
-            ja3: self.tls_ja3.clone(),
-            alpn: self.tls_alpn.clone(),
-            signature_algos: self.tls_sigalgos.clone(),
-            supported_versions: self.tls_versions.clone(),
-            keyshare_curves: self.tls_keyshare.clone(),
-        }
-    }
+    // pub fn get_fingerprint_spec(&self) -> FingerprintSpec {
+    //     FingerprintSpec {
+    //         ja3: self.tls_ja3.clone(),
+    //         alpn: self.tls_alpn.clone(),
+    //         signature_algos: self.tls_sigalgos.clone(),
+    //         supported_versions: self.tls_versions.clone(),
+    //         keyshare_curves: self.tls_keyshare.clone(),
+    //     }
+    // }
 
     pub fn build_client(&self) -> Client {
-        Client::new_with_fingerprint(
+        Client::new(
             self.key.as_bytes(),
             self.server_name.as_str().try_into().unwrap(),
-            self.get_fingerprint_spec(),
+            // self.get_fingerprint_spec(),
         )
     }
 }
@@ -163,15 +162,15 @@ fn parse_preflight_bounds(s: &str) -> Result<(usize, Option<usize>), &str> {
     }
 }
 
-fn parse_u16_array(s: &str) -> Result<Array<u16>, &'static str> {
-    ConcatenatedParser::<u16, ','>::from_str(s).map(|p| p.into_inner())
-}
+// fn parse_u16_array(s: &str) -> Result<Array<u16>, &'static str> {
+//     ConcatenatedParser::<u16, ','>::from_str(s).map(|p| p.into_inner())
+// }
 
-fn parse_alpn_array(s: &str) -> Result<Array<Vec<u8>>, &'static str> {
-    // TODO: this creates temporary Vec
-    Ok(ConcatenatedParser::<String, ','>::from_str(s)
-        .map(|p| p.into_inner())?
-        .into_iter()
-        .map(|e| e.into_bytes())
-        .collect())
-}
+// fn parse_alpn_array(s: &str) -> Result<Array<Vec<u8>>, &'static str> {
+//     // TODO: this creates temporary Vec
+//     Ok(ConcatenatedParser::<String, ','>::from_str(s)
+//         .map(|p| p.into_inner())?
+//         .into_iter()
+//         .map(|e| e.into_bytes())
+//         .collect())
+// }

@@ -645,8 +645,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "noisy-shuttle"
-version = "0.2.1"
+name = "noisy-shuttle-sm"
+version = "0.2.1-sm"
 dependencies = [
  "anyhow",
  "async-trait",

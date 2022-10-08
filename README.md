@@ -1,3 +1,8 @@
+**❗ Patched edition for RFC8998 ❗**   
+Still the same idea, with RFC8998 TLS1.3_SM4_GCM_SM3 as cipher suite / SM2 as KeyShare curve hardcoded as suggested [here](https://github.com/net4people/bbs/issues/129#issuecomment-1272289638). 
+
+Not serious. Just works. No maintenance.
+
 # noisy-shuttle
 
 [![Build](https://github.com/Gowee/noisy-shuttle/actions/workflows/build.yml/badge.svg)](https://github.com/Gowee/noisy-shuttle/actions/workflows/build.yml)
@@ -57,10 +62,22 @@ The client would serve a SOCKS5/HTTP (adaptive) proxy at `listen_addr`.
 
 `sni` should match `camouflage_addr` specified server-side.
 
+## FAQ for the patched edition
+
+### Where to find a RFC8998 compatible website for camouflage?
+[Feel lucky](https://www.google.com/search?q=TLS1.3_SM4_GCM_SM3)
+
+### It is fine to use a standard TLS server without RFC8998 support for camouflage?
+Yes. The ServerHello is hardcoded if the client is authenticated.
+
+Otherwise it fallbacks to forwarding traffic to the camouflage server, in which case, active probing would reveal the server does not actually support RFC8998. But, never mind, since this implementation is not serious, leaving many other characteristics to be distinguished.
+
+<!--
 **Or optionally specifying a TLS fingerprint ([chrome](https://tlsfingerprint.io/id/e47eae8f8c4887b6)):**
 ```sh
 ./noisy-shuttle client 127.0.0.1:1080 server.addr.example:443 www.example.com Teap0taa --tls-ja3 769,2570-4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,2570-0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-2570-21,2570-29-23-24,0 --tls-alpn h2,http/1.1 --tls-sigalgos 1027,2052,1025,1283,2053,1281,2054,1537 --tls-versions 2570,772,771 --tls-keyshare 2570
 ```
+-->
 
 <!--
 Example fingerprints:

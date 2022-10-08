@@ -1,6 +1,7 @@
 mod client;
 mod common;
 mod fp;
+mod rfc8998;
 mod server;
 mod totp;
 mod utils;
