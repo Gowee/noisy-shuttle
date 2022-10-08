@@ -1,5 +1,5 @@
 [package]
-name = "noisy-shuttle-sm"
+name = "noisy-shuttle"
 version = "0.2.1-sm"
 edition = "2021"
 
