@@ -1,4 +1,5 @@
 use blake2::{Blake2s256, Digest};
+use hmac::{Mac, SimpleHmac};
 use rustls::internal::msgs::codec::Reader;
 use rustls::internal::msgs::handshake::{
     ClientExtension, ClientHelloPayload, HandshakeMessagePayload, HandshakePayload,
@@ -8,6 +9,7 @@ use rustls::internal::msgs::message::{Message, MessageError, MessagePayload, Opa
 use rustls::{ContentType as TlsContentType, Error as RustlsError, ProtocolVersion};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 
+use std::cmp;
 use std::convert::TryFrom;
 use std::io::{self, Read};
 use std::pin::Pin;
@@ -19,24 +21,24 @@ pub fn u16_from_be_slice(s: &[u8]) -> u16 {
     u16::from_be_bytes(<[u8; 2]>::try_from(s).unwrap())
 }
 
-pub trait HandshakeStateExt {
-    fn writen<const N: usize>(&mut self) -> Result<[u8; N], snow::Error>;
-}
+// pub trait HandshakeStateExt {
+//     fn writen<const N: usize>(&mut self) -> Result<[u8; N], snow::Error>;
+// }
 
-impl HandshakeStateExt for snow::HandshakeState {
-    fn writen<const N: usize>(&mut self) -> Result<[u8; N], snow::Error> {
-        let mut buf = [0u8; N];
-        let len = self.write_message(&[], &mut buf)?;
-        assert_eq!(
-            len,
-            buf.len(),
-            "Expected {}, got {} when writing snow handshake message",
-            buf.len(),
-            len
-        );
-        Ok(buf)
-    }
-}
+// impl HandshakeStateExt for snow::HandshakeState {
+//     fn writen<const N: usize>(&mut self,) -> Result<[u8; N], snow::Error> {
+//         let mut buf = [0u8; N];
+//         let len = self.write_message(&[], &mut buf)?;
+//         assert_eq!(
+//             len,
+//             buf.len(),
+//             "Expected {}, got {} when writing snow handshake message",
+//             buf.len(),
+//             len
+//         );
+//         Ok(buf)
+//     }
+// }
 
 // pub trait AsyncReadExxt<T: tokio::io::AsyncReadExt> {
 //     async fn readn<const N: usize>(&mut self) -> tokio::io::Result<[u8; N]> {
@@ -237,16 +239,37 @@ pub fn get_client_tls_versions(shp: &ClientHelloPayload) -> Option<&Vec<Protocol
 //     }
 // }
 
-pub fn possibly_insecure_hash_with_key(key: impl AsRef<[u8]>, msg: impl AsRef<[u8]>) -> [u8; 32] {
+pub fn hmac(key: impl AsRef<[u8]>, msg: impl AsRef<[u8]>) -> [u8; 32] {
+    // The function will be used as both HMAC and KDF.
     // Blake3 defines a key derivation function, but blake2 does not. We use blake2 to avoid
     // introducing a extra dependency.
-    let mut hh = Blake2s256::new();
-    hh.update(key.as_ref());
-    let mut h = Blake2s256::new();
-    h.update(<[u8; 32]>::from(hh.finalize()));
-    h.update(msg.as_ref());
-    h.finalize().into()
+    let mut mac = SimpleHmac::<Blake2s256>::new_from_slice(key.as_ref())
+        .expect("HMAC can take key of any size");
+    mac.update(msg.as_ref());
+    mac.finalize().into_bytes().try_into().unwrap()
 }
+
+pub trait Xor {
+    fn xored(&mut self, other: &[u8]);
+}
+
+impl Xor for &mut [u8] {
+    fn xored(&mut self, other: &[u8]) {
+        for i in 0..cmp::min(self.len(), other.len()) {
+            self[i] ^= other[i];
+        }
+    }
+}
+
+// pub fn array_xor<const N: usize>(a: impl AsRef<[u8]>, b: impl AsRef<[u8]>) -> [u8; N] {
+//     let a = <&[u8; N]>::try_from(a.as_ref()).unwrap();
+//     let b = <&[u8; N]>::try_from(a.as_ref()).unwrap();
+//     let mut x = [0u8; N];
+//     for i in 0..N {
+//         x[i] = a[i] ^ b[i];
+//     }
+//     x
+// }
 
 macro_rules! try_assign {
     ($left: expr, $right: expr) => {

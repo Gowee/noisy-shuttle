@@ -12,13 +12,13 @@ use std::io;
 use std::mem::{self, MaybeUninit};
 use std::sync::Arc;
 
+use crate::common::NO_ELLIGATOR_WORKAROUND;
 use crate::totp::Totp;
-use crate::utils::{parse_tls_plain_message, u16_from_be_slice};
+use crate::utils::{hmac, parse_tls_plain_message, u16_from_be_slice, Xor};
 use crate::FingerprintSpec;
 
 use crate::utils::{
-    get_server_tls_version, read_tls_message, HandshakeStateExt, NoCertificateVerification,
-    TlsMessageExt,
+    get_server_tls_version, read_tls_message, NoCertificateVerification, TlsMessageExt,
 };
 
 use super::common::{
@@ -33,6 +33,7 @@ pub struct Client {
     pub server_name: ServerName,
     pub fingerprint_spec: Arc<FingerprintSpec>,
     pub totp: Totp,
+    pub _curve_point_mask: [u8; 32],
     // pub verify_tls: bool,
 }
 
@@ -42,13 +43,7 @@ impl Client {
     /// The server name would be sent out as [Server Name Indication](https://en.wikipedia.org/wiki/Server_Name_Indication).
     /// Generally, it should match the camouflage server address specified on a tunnel's server-side. .
     pub fn new(key: impl AsRef<[u8]>, server_name: ServerName) -> Self {
-        let key = key.as_ref();
-        Client {
-            key: derive_psk(key),
-            server_name,
-            fingerprint_spec: Default::default(),
-            totp: Totp::new(key, 60, 2),
-        }
+        Self::new_with_fingerprint(key, server_name, Default::default())
     }
 
     /// Create a client with a pre-shared key, a server name for camouflage and additionally a
@@ -64,27 +59,43 @@ impl Client {
             server_name,
             fingerprint_spec: Arc::new(fingerprint_spec),
             totp: Totp::new(key, 60, 2),
+            _curve_point_mask: hmac(NO_ELLIGATOR_WORKAROUND, key),
         }
     }
 
-    /// Handshake with a peer server of the connected `TcpStream`
-    pub async fn connect(&self, mut stream: TcpStream) -> io::Result<SnowyStream> {
+    /// Handshake with a peer server on the other end of the `TcpStream`
+    #[inline(always)]
+    pub async fn connect(&self, stream: TcpStream) -> io::Result<SnowyStream> {
+        self.connect_with_early_data(stream, [0u8; 16]).await
+    }
+
+    /// Handshake with a peer server on the other end of the `TcpStream`, sending a early data
+    /// piggybacked by ClientHello
+    ///
+    /// The early data embeded covertly in ClientHello session id along with Noise handshake. And
+    /// it has nothing to do with TLS 1.3 early data.
+    pub async fn connect_with_early_data(
+        &self,
+        mut stream: TcpStream,
+        early_data: [u8; 16],
+    ) -> io::Result<SnowyStream> {
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
             .build_initiator()
             .expect("Noise params valid");
         // Noise: -> psk, e
-        let psk_e = initiator.writen::<48>().expect("Noise state valid");
-        let random = <[u8; 32]>::try_from(&psk_e[0..32]).unwrap();
-        let mut session_id = [0u8; 32];
-        session_id[..16].copy_from_slice(&psk_e[32..48]);
-        session_id[16..].copy_from_slice(&self.totp.sign_current::<16>(&psk_e[0..32])); // timesig
-        trace!(
-            "noise ping to {:?}, psk_e {:x?}, timesig: {:x?}",
-            &stream,
-            psk_e,
-            &session_id[16..]
-        );
+        let mut ping = [0u8; 64];
+        let time_token = self.totp.generate_current::<16>();
+        initiator
+            .write_message(&early_data, &mut ping)
+            .expect("Noise state valid");
+        (&mut ping[0..32]).xored(&self._curve_point_mask);
+        (&mut ping[48..64]).xored(&time_token); // sign AEAD tag with time
+                                                // Mask the curve point to avoid being distinguished. It is a temporary workaround.
+                                                // We should have used Elligator. But there seems no working implementation in Rust for now.
+        let random = <[u8; 32]>::try_from(&ping[0..32]).unwrap();
+        let session_id = <[u8; 32]>::try_from(&ping[32..64]).unwrap();
+        trace!("noise ping to {:?}, ping: {:x?}", &stream, ping,);
 
         let chwriter = self
             .fingerprint_spec

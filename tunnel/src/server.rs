@@ -12,11 +12,13 @@ use std::mem;
 use std::net::SocketAddr;
 use std::sync::Mutex;
 
-use crate::common::{derive_psk, SnowyStream, NOISE_PARAMS, PSKLEN};
+use crate::common::{
+    derive_psk, EarlyData, SnowyStream, NOISE_PARAMS, NO_ELLIGATOR_WORKAROUND, PSKLEN,
+};
 use crate::totp::Totp;
 use crate::utils::{
-    get_client_tls_versions, get_server_tls_version, parse_tls_plain_message, read_tls_message,
-    u16_from_be_slice, TlsMessageExt,
+    get_client_tls_versions, get_server_tls_version, hmac, parse_tls_plain_message,
+    read_tls_message, u16_from_be_slice, TlsMessageExt, Xor,
 };
 
 /// Server with config to establish snowy tunnels with peer clients
@@ -26,6 +28,7 @@ pub struct Server<A: ToSocketAddrs + Debug> {
     pub camouflage_addr: A,
     pub replay_filter: Mutex<LruCache<[u8; 32], SocketAddr>>, // TODO: TOTP; prevent DoS attack
     pub totp: Totp,
+    pub _curve_point_mask: [u8; 32],
 }
 
 impl<A: ToSocketAddrs + Debug> Server<A> {
@@ -42,10 +45,18 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
             camouflage_addr,
             replay_filter: Mutex::new(LruCache::new(replay_filter_size)),
             totp: Totp::new(key, 60, 2),
+            _curve_point_mask: hmac(NO_ELLIGATOR_WORKAROUND, key),
         }
     }
 
-    /// Accept a incoming TcpStream as a snowy tunnel.
+    /// Accept a incoming TcpStream as a [`SnowyStream`].
+    ///
+    /// See [`accept_with_early_data`](#method.accept_with_early_data) for more info.
+    pub async fn accept(&self, inbound: TcpStream) -> Result<SnowyStream, AcceptError> {
+        self.accept_with_early_data(inbound).await.map(|(s, _d)| s)
+    }
+
+    /// Accept a incoming TcpStream as a [`SnowyStream`].
     ///
     /// The server tries to authenticate a client by a Noise handshake message piggybacked by a TLS
     /// ClientHello (the first message in TLS handshakes). If the client is successfully
@@ -58,7 +69,10 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
     /// [`AcceptError`]. The caller may decide to proceed to forward traffic between the client and
     /// the camouflage server on its own (falling back to dumb relay) or just reject/drop the
     /// connection.
-    pub async fn accept(&self, mut inbound: TcpStream) -> Result<SnowyStream, AcceptError> {
+    pub async fn accept_with_early_data(
+        &self,
+        mut inbound: TcpStream,
+    ) -> Result<(SnowyStream, EarlyData), AcceptError> {
         use AcceptError::*;
 
         let mut responder = snow::Builder::new(NOISE_PARAMS.clone())
@@ -73,8 +87,7 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
         //   session id + ..
 
         // Noise: -> psk, e
-        let mut psk_e = [0u8; 48];
-        let mut timesig = [0u8; 16];
+        let mut ping = [0u8; 64];
         match read_tls_message(&mut inbound, &mut buf)
             .await?
             .ok()
@@ -83,10 +96,9 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
             .and_then(|msg| msg.into_client_hello_payload())
         {
             Some(chp) => {
-                chp.random.write_slice(&mut psk_e[..32]); // client random
+                chp.random.write_slice(&mut ping[..32]); // client random
                 let s: (usize, [u8; 32]) = chp.session_id.into();
-                psk_e[32..].copy_from_slice(&s.1[..16]); // session id
-                timesig.copy_from_slice(&s.1[16..32]);
+                ping[32..].copy_from_slice(&s.1[..32]); // session id
 
                 let client_tls1_3 = get_client_tls_versions(&chp)
                     .map(|vers| vers.iter().any(|&ver| ver == ProtocolVersion::TLSv1_3))
@@ -101,20 +113,25 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
                 return Err(ClientHelloInvalid { buf, io: inbound });
             }
         }
-        trace!(
-            "noise ping from {:?}, psk_e {:x?}, timesig: {:x?}",
-            &inbound,
-            psk_e,
-            timesig
-        );
-        let e = psk_e[..32].try_into().unwrap();
-        if !self.totp.verify_current(e, &timesig)
-            || responder.read_message(&psk_e, &mut []).is_err()
-        {
+        trace!("noise ping from {:?}, ping: {:x?}", &inbound, ping,);
+        (&mut ping[..32]).xored(&self._curve_point_mask);
+        let mut early_data = [0u8; 16];
+        let mut verified = false;
+        for token in self.totp.generate_current_skewed::<16>() {
+            (&mut ping[48..64]).xored(&token);
+            if responder.read_message(&ping, &mut early_data).is_ok() {
+                verified = true;
+                break;
+            }
+            (&mut ping[48..64]).xored(&token);
+        }
+        if !verified {
             return Err(Unauthenticated { buf, io: inbound });
         }
         debug!("authenticated {:?}", &inbound);
+        debug!("early_data: {:x?}", early_data);
         {
+            let e = ping[..32].try_into().unwrap();
             let mut rf = self.replay_filter.lock().unwrap();
             if let Some(&client_id) = rf.get(&e) {
                 return Err(ReplayDetected {
@@ -196,7 +213,7 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
             .into_transport_mode()
             .expect("Noise handshake done");
         trace!("noise handshake done with {:?}", inbound);
-        Ok(SnowyStream::new(inbound, responder))
+        Ok((SnowyStream::new(inbound, responder), early_data))
     }
 }
 

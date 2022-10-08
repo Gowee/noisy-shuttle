@@ -13,7 +13,7 @@ use std::io::{self};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::utils::{possibly_insecure_hash_with_key, SyncReadAdapter};
+use crate::utils::{hmac, SyncReadAdapter};
 
 lazy_static! {
     pub static ref NOISE_PARAMS: NoiseParams =
@@ -29,6 +29,11 @@ pub const PSKLEN: usize = 32; // snow::constants::PSKLEN;
 pub const DEFAULT_ALPN_PROTOCOLS: [&[u8]; 2] = [b"http/2".as_slice(), b"http/1.1".as_slice()];
 
 const CONTEXT: &[u8] = b"the secure tunnel under snow";
+pub const NO_ELLIGATOR_WORKAROUND: &[u8] = b"no elligator workaround";
+
+// Early data piggybacked by handshake. It is embeded covertly in ClientHello session id along with
+// Noise handshake. And it has nothing to do with TLS 1.3 early data.
+pub type EarlyData = [u8; 16];
 
 /// Secure tunnel on the top of TcpStream encrypted by Noise
 // #[derive(Debug)]
@@ -385,5 +390,5 @@ impl SnowyState {
 }
 
 pub fn derive_psk(key: impl AsRef<[u8]>) -> [u8; PSKLEN] {
-    possibly_insecure_hash_with_key(CONTEXT, key)
+    hmac(CONTEXT, key)
 }
