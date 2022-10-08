@@ -1,12 +1,14 @@
 **❗ Patched edition for RFC8998 ❗**   
 Still the same idea, with RFC8998 TLS1.3_SM4_GCM_SM3 as cipher suite / SM2 as KeyShare curve hardcoded as suggested [here](https://github.com/net4people/bbs/issues/129#issuecomment-1272289638). 
 
+[➡️ Binaries](https://github.com/Gowee/noisy-shuttle/releases/tag/v0.2.1-sm)
+
 Not serious. Just works. No maintenance.
 
 # noisy-shuttle
 
 [![Build](https://github.com/Gowee/noisy-shuttle/actions/workflows/build.yml/badge.svg)](https://github.com/Gowee/noisy-shuttle/actions/workflows/build.yml)
-[![GitHub Release](https://img.shields.io/github/release/Gowee/noisy-shuttle.svg?style=flat)]()  
+<!-- [![GitHub Release](https://img.shields.io/github/release/Gowee/noisy-shuttle.svg?style=flat)]()   -->
 
 noisy-shuttle establishes an AEAD-encrypted secure tunnel with forward secrecy for circumventing Internet censorship. It is designed  to be indistinguishable from TLS traffic with any chosen website for camouflage by copying authentic TLS handshake messages. 
 
