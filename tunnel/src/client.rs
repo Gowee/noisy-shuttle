@@ -114,7 +114,7 @@ impl Client {
         // .expect("TLS config valid");
         let mut sm2_point = vec![0u8; 65];
         rand::thread_rng().fill(sm2_point.as_mut_slice());
-        let ch = generate_rfc8998_client_hello(random, session_id, sm2_point);
+        let ch = generate_rfc8998_client_hello(random, session_id, &self.server_name, sm2_point);
         let ch = PlainMessage::from(ch).into_unencrypted_opaque();
         // let mut buf: Vec<MaybeUninit<u8>> =
         //     Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
