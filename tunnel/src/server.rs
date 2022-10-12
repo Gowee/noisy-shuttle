@@ -1,5 +1,5 @@
 use lru::LruCache;
-use rand::{thread_rng, Rng};
+use rand::Rng;
 use rustls::{HandshakeType, ProtocolVersion};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
@@ -14,12 +14,15 @@ use std::sync::Mutex;
 
 use crate::common::{
     derive_psk, EarlyData, SnowyStream, NOISE_PARAMS, NO_ELLIGATOR_WORKAROUND, PSKLEN,
+    TLS_RECORD_HEADER_LENGTH,
 };
 use crate::totp::Totp;
 use crate::utils::{
     get_client_tls_versions, get_server_tls_version, hmac, parse_tls_plain_message,
     read_tls_message, u16_from_be_slice, TlsMessageExt, Xor,
 };
+
+const SERVER_HELLO_RANDOM_START_INDEX: usize = TLS_RECORD_HEADER_LENGTH + 6;
 
 /// Server with config to establish snowy tunnels with peer clients
 #[derive(Debug)]
@@ -88,31 +91,32 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
 
         // Noise: -> psk, e
         let mut ping = [0u8; 64];
-        match read_tls_message(&mut inbound, &mut buf)
+        let chp = match read_tls_message(&mut inbound, &mut buf)
             .await?
             .ok()
             .and_then(|_| parse_tls_plain_message(&buf).ok())
             .filter(|msg| msg.is_handshake_type(HandshakeType::ClientHello))
             .and_then(|msg| msg.into_client_hello_payload())
         {
-            Some(chp) => {
-                chp.random.write_slice(&mut ping[..32]); // client random
-                let s: (usize, [u8; 32]) = chp.session_id.into();
-                ping[32..].copy_from_slice(&s.1[..32]); // session id
-
-                let client_tls1_3 = get_client_tls_versions(&chp)
-                    .map(|vers| vers.iter().any(|&ver| ver == ProtocolVersion::TLSv1_3))
-                    .unwrap_or(false);
-                trace!(
-                    "client {} supports TLS 1.3: {}",
-                    inbound.peer_addr().unwrap(),
-                    client_tls1_3
-                );
-            }
+            Some(chp) => chp,
             None => {
                 return Err(ClientHelloInvalid { buf, io: inbound });
             }
-        }
+        };
+
+        chp.random.write_slice(&mut ping[..32]); // client random
+        let s: (usize, [u8; 32]) = chp.session_id.into();
+        ping[32..].copy_from_slice(&s.1[..32]); // session id
+
+        let client_tls1_3 = get_client_tls_versions(&chp)
+            .map(|vers| vers.iter().any(|&ver| ver == ProtocolVersion::TLSv1_3))
+            .unwrap_or(false);
+        trace!(
+            "client {} supports TLS 1.3: {}",
+            inbound.peer_addr().unwrap(),
+            client_tls1_3
+        );
+
         trace!("noise ping from {:?}, ping: {:x?}", &inbound, ping,);
         (&mut ping[..32]).xored(&self._curve_point_mask);
         let mut early_data = [0u8; 16];
@@ -166,8 +170,20 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
                 });
             }
         };
-        // forward camouflage server hello back to client
-        inbound.write_all(&buf).await?;
+
+        let mut pong = [0u8; 48];
+        let len = responder
+            .write_message(&[], &mut pong)
+            .expect("Noise state valid");
+        debug_assert_eq!(len, 48);
+        trace!(
+            // pad_len = pong.len() - (5 + 48),
+            "e, ee to {:?}: {:x?}",
+            inbound,
+            &pong
+        );
+        (&mut pong[0..32]).xored(&self._curve_point_mask);
+
         match get_server_tls_version(&shp) {
             Some(ProtocolVersion::TLSv1_3) => {
                 // TLS 1.3: handshake done
@@ -176,6 +192,18 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
                     inbound.peer_addr().unwrap(),
                     outbound.peer_addr().unwrap()
                 );
+                // forward camouflage server hello back to client
+                inbound.write_all(&buf).await?;
+
+                let len = rand::thread_rng().gen_range(108..908);
+                buf.reserve_exact(TLS_RECORD_HEADER_LENGTH + len);
+                unsafe { buf.set_len(TLS_RECORD_HEADER_LENGTH + len) };
+                buf[..3].copy_from_slice(&[0x17, 0x03, 0x03]);
+                buf[3..5].copy_from_slice(&(len as u16).to_be_bytes());
+                buf[5..5 + 48].copy_from_slice(&pong);
+                rand::thread_rng().fill(&mut buf[5 + 48..len - 48]);
+                inbound.write_all(&buf).await?;
+                trace!("written pong");
             }
             _ => {
                 // TLS 1.2: continue handshake
@@ -184,30 +212,77 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
                     inbound.peer_addr().unwrap(),
                     outbound.peer_addr().unwrap()
                 );
-                relay_until_tls12_handshake_finished(&mut inbound, &mut outbound).await?;
-                debug!(
-                    "{} <-> {} full handshake done",
-                    inbound.peer_addr().unwrap(),
-                    outbound.peer_addr().unwrap()
-                );
+                if chp.session_id == shp.session_id {
+                    debug!("tls session resumed");
+                    // session resumed
+                    buf[SERVER_HELLO_RANDOM_START_INDEX..SERVER_HELLO_RANDOM_START_INDEX + 32]
+                        .copy_from_slice(&pong[0..32]);
+
+                    // forward camouflage server hello back to client
+                    inbound.write_all(&buf).await?;
+
+                    read_tls_message(&mut outbound, &mut buf)
+                        .await?
+                        .expect("TODO"); // ChangeCipherSpec
+                    inbound.write_all(&buf).await?;
+                    read_tls_message(&mut outbound, &mut buf)
+                        .await?
+                        .expect("TODO"); // Finished
+                    buf[TLS_RECORD_HEADER_LENGTH..TLS_RECORD_HEADER_LENGTH + 16]
+                        .copy_from_slice(&pong[32..48]);
+                    inbound.write_all(&buf).await?;
+                    debug!(
+                        "{} <-> {} tls session resumed",
+                        inbound.peer_addr().unwrap(),
+                        outbound.peer_addr().unwrap()
+                    );
+                } else {
+                    debug!("tls full handshaking");
+
+                    // forward camouflage server hello back to client
+                    inbound.write_all(&buf).await?;
+
+                    relay_until_tls12_handshake_finished(&mut inbound, &mut outbound).await?;
+                    debug!(
+                        "{} <-> {} tls full handshake done",
+                        inbound.peer_addr().unwrap(),
+                        outbound.peer_addr().unwrap()
+                    );
+
+                    read_tls_message(&mut inbound, &mut buf)
+                        .await?
+                        .expect("TODO"); // dummy
+                    debug!(len = buf.len(), "read dummy");
+
+                    let len = rand::thread_rng().gen_range(108..908);
+                    buf.reserve_exact(TLS_RECORD_HEADER_LENGTH + len);
+                    unsafe { buf.set_len(TLS_RECORD_HEADER_LENGTH + len) };
+                    buf[..3].copy_from_slice(&[0x17, 0x03, 0x03]);
+                    buf[3..5].copy_from_slice(&(len as u16).to_be_bytes());
+                    buf[5..5 + 48].copy_from_slice(&pong);
+                    rand::thread_rng().fill(&mut buf[5 + 48..len - 48]);
+
+                    inbound.write_all(&buf).await?;
+                    trace!("written pong");
+                }
             }
         }
 
         // handshake done, drop connection to camouflage server
         mem::drop(outbound);
 
-        // Noise: <- e, ee
-        let mut pong = [0u8; 5 + 48 + 24]; // 0 - 24 random padding
-        let pad_len = thread_rng().gen_range(0..=24);
-        rand::thread_rng().fill(&mut pong[5 + 48..5 + 48 + pad_len]);
-        pong[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30 + pad_len as u8]);
-        let len = responder
-            .write_message(&[], &mut pong[5..])
-            .expect("Noise state valid");
-        debug_assert_eq!(len, 48);
-        trace!(pad_len, "e, ee to {:?}: {:x?}", inbound, &pong[5..5 + 48]);
-        inbound.write_all(&pong[..5 + 48 + pad_len]).await?;
-        // but, is uniform random length of initial messages a characteristic per se?
+        // // Noise: <- e, ee
+        // let mut pong = [0u8; 5 + 48 + 24]; // 0 - 24 random padding
+        // let pad_len = thread_rng().gen_range(0..=24);
+        // rand::thread_rng().fill(&mut pong[5 + 48..5 + 48 + pad_len]);
+        // pong[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30 + pad_len as u8]);
+        // let len = responder
+        //     .write_message(&[], &mut pong[5..])
+        //     .expect("Noise state valid");
+        // debug_assert_eq!(len, 48);
+        // trace!(pad_len, "e, ee to {:?}: {:x?}", inbound, &pong[5..5 + 48]);
+        // inbound.write_all(&pong[..5 + 48 + pad_len]).await?;
+        // // but, is uniform random length of initial messages a characteristic per se?
 
         let responder = responder
             .into_transport_mode()

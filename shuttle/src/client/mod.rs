@@ -4,6 +4,7 @@ use tracing::{debug, info, warn};
 
 use std::time::Duration;
 
+use crate::client::connector::AdHocConnector;
 use crate::opt::CltOpt;
 
 mod connector;
@@ -12,7 +13,7 @@ mod plain;
 // mod redir; // UNIMPLEMENTED
 
 use self::connector::{PREFLIHGTER_CONNIDLE, PREFLIHGTER_EMA_COEFF};
-use self::muxpool::YamuxConnector;
+
 use self::plain::serve as serve_plain;
 
 /// Maximum size of the initial data from inbound TCP socket which would be sent together with
@@ -51,7 +52,8 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     //         serve_plain(opt.listen_addr, preflighter).await?;
     //     }
     // };// FIX:
-    let connector = YamuxConnector::new(client, opt.remote_addr, 128);
+    // let connector = YamuxConnector::new(client, opt.remote_addr, 1);
+    let connector = AdHocConnector::new(client, opt.remote_addr);
     serve_plain(opt.listen_addr, connector).await?;
     Ok(())
 }

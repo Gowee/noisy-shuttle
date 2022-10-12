@@ -1,3 +1,5 @@
+use derivative::Derivative;
+use rand::Rng;
 use rustls::internal::msgs::enums::ExtensionType;
 use rustls::{
     ClientConnection as RustlsClientConnection, ContentType as TlsContentType, HandshakeType,
@@ -8,7 +10,7 @@ use tokio::net::TcpStream;
 use tracing::warn;
 use tracing::{debug, trace};
 
-use std::io;
+use std::io::{self, Write};
 use std::mem::{self, MaybeUninit};
 use std::sync::Arc;
 
@@ -27,10 +29,13 @@ use super::common::{
 };
 
 /// Client with config to establish snowy tunnels with peer servers
-#[derive(Debug, Clone)]
+#[derive(Clone, Derivative)]
+#[derivative(Debug)]
 pub struct Client {
     pub key: [u8; PSKLEN],
     pub server_name: ServerName,
+    #[derivative(Debug = "ignore")]
+    pub tlsconf: rustls::ClientConfig,
     pub fingerprint_spec: Arc<FingerprintSpec>,
     pub totp: Totp,
     pub _curve_point_mask: [u8; 32],
@@ -54,9 +59,32 @@ impl Client {
         fingerprint_spec: FingerprintSpec,
     ) -> Self {
         let key = key.as_ref();
+
+        // TODO: option for verifying camouflage cert
+        let mut tlsconf = rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
+            .with_no_client_auth();
+        if let Some(ref ja3) = fingerprint_spec.ja3 {
+            // fingerprint_spec.alpn is effective iff alpn is set in ja3
+            if ja3
+                .extensions_as_typed()
+                .any(|ext| ext == ExtensionType::ALProtocolNegotiation)
+            {
+                // It is necessary to add it to conf. Only adding it to allowed_unsolicited_extensions
+                // resulted in TLS client rejection when ALPN is negeotiated.
+                tlsconf.alpn_protocols = fingerprint_spec
+                    .alpn
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from)));
+            }
+        }
+
         Client {
             key: derive_psk(key),
             server_name,
+            tlsconf,
             fingerprint_spec: Arc::new(fingerprint_spec),
             totp: Totp::new(key, 60, 2),
             _curve_point_mask: hmac(NO_ELLIGATOR_WORKAROUND, key),
@@ -89,43 +117,26 @@ impl Client {
         initiator
             .write_message(&early_data, &mut ping)
             .expect("Noise state valid");
+        // Mask the curve point to avoid being distinguished. It is a temporary workaround.
+        // We should have used Elligator. But there seems no working implementation in Rust for now.
         (&mut ping[0..32]).xored(&self._curve_point_mask);
-        (&mut ping[48..64]).xored(&time_token); // sign AEAD tag with time
-                                                // Mask the curve point to avoid being distinguished. It is a temporary workaround.
-                                                // We should have used Elligator. But there seems no working implementation in Rust for now.
-        let random = <[u8; 32]>::try_from(&ping[0..32]).unwrap();
-        let session_id = <[u8; 32]>::try_from(&ping[32..64]).unwrap();
+        // sign AEAD tag with time (many-time pad should be generally secure since tag is random)
+        (&mut ping[48..64]).xored(&time_token);
+        let random = <[u8; 32]>::try_from(&ping[0..32]).unwrap().into();
+        let session_id = <[u8; 32]>::try_from(&ping[32..64])
+            .unwrap()
+            .as_slice()
+            .into();
         trace!("noise ping to {:?}, ping: {:x?}", &stream, ping,);
 
         let chwriter = self
             .fingerprint_spec
             .get_client_hello_overwriter(true, true);
-        // TODO: option for verifying camouflage cert
-        let mut tlsconf = rustls::ClientConfig::builder()
-            .with_safe_defaults()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
-            .with_no_client_auth();
-        if let Some(ref ja3) = self.fingerprint_spec.ja3 {
-            // fingerprint_spec.alpn is effective iff alpn is set in ja3
-            if ja3
-                .extensions_as_typed()
-                .any(|ext| ext == ExtensionType::ALProtocolNegotiation)
-            {
-                // It is necessary to add it to conf. Only adding it to allowed_unsolicited_extensions
-                // resulted in TLS client rejection when ALPN is negeotiated.
-                tlsconf.alpn_protocols = self
-                    .fingerprint_spec
-                    .alpn
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from)));
-            }
-        }
         let mut tlsconn = rustls::ClientConnection::new_with(
-            Arc::new(tlsconf.clone()),
+            Arc::new(self.tlsconf.clone()),
             self.server_name.clone(),
-            random.into(),
-            Some(session_id.as_slice().into()),
+            random,
+            Some(session_id),
             None,
             None,
             chwriter,
@@ -154,6 +165,8 @@ impl Client {
                 io::Error::new(io::ErrorKind::InvalidData, "Not or invalid Server Hello")
             })?;
 
+        let mut pong = [0u8; 48];
+
         // server negotiated TLS version
         match get_server_tls_version(&shp) {
             Some(ProtocolVersion::TLSv1_3) => {
@@ -167,47 +180,105 @@ impl Client {
                 // TODO: Cache SH for latter use instead of request camouflage server every time.
                 // TODO: Send mibble box compatibility CCS and more ApplicationData frames, as
                 //   in typical TLS 1.3 handshake.
+
+                // Noise: <- e, ee
+                read_tls_message(&mut stream, &mut buf)
+                    .await?
+                    .map_err(|_e| {
+                        io::Error::new(io::ErrorKind::InvalidData, "First data frame not noise")
+                    })?; // TODO: timeout
+                if buf.len() < 5 + 48 {
+                    warn!(
+                        "Noise handshake {} <-> {} failed. Wrong key or time out of sync?",
+                        stream.local_addr().unwrap(),
+                        stream.peer_addr().unwrap()
+                    );
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Noise handshake failed due to message length shorter than expected",
+                    ));
+                }
+                pong[0..48]
+                    .copy_from_slice(&buf[TLS_RECORD_HEADER_LENGTH..TLS_RECORD_HEADER_LENGTH + 48]);
+                (&mut pong[0..32]).xored(&self._curve_point_mask);
             }
             _ => {
                 // TLS 1.2: conitnue full handshake via rustls
                 // In TLS 1.2, the handshake procedures are basically transparent. That is, an
                 // eavesdropper could verify the unencrypted signature against the camouflage
                 // servers' public key. So the camouflage server is requested every time.
+                if shp.session_id == session_id {
+                    // tls session resumed
+                    pong[0..32].copy_from_slice(&shp.random.0);
+                    (&mut pong[0..32]).xored(&self._curve_point_mask);
 
-                // feed previously read Server Hello
-                tlsconn.read_tls(&mut io::Cursor::new(&mut buf))?;
-                tls12_handshake(&mut tlsconn, &mut stream, false).await?;
-                // TLS1.2 handshake done
+                    read_tls_message(&mut stream, &mut buf)
+                        .await?
+                        .expect("TODO"); // CCS
+                    read_tls_message(&mut stream, &mut buf)
+                        .await?
+                        .expect("TODO"); // Finished
+                    if pong.len() < 16 {
+                        warn!(
+                            "Noise handshake {} <-> {} failed: Expected handshake Finished, got something too short",
+                            stream.local_addr().unwrap(),
+                            stream.peer_addr().unwrap()
+                        );
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Noise handshake failed due to message length shorter than expected",
+                        ));
+                    }
+                    pong[32..48].copy_from_slice(
+                        &buf[TLS_RECORD_HEADER_LENGTH..TLS_RECORD_HEADER_LENGTH + 16],
+                    );
+                } else {
+                    // feed previously read Server Hello
+                    tlsconn.read_tls(&mut io::Cursor::new(&mut buf))?;
+                    tls12_handshake(&mut tlsconn, &mut stream, false).await?;
+                    // TLS1.2 handshake done
+                    // send a dummy packet as camouflage
+                    let len = rand::thread_rng().gen_range(108..908);
+                    buf.reserve_exact(TLS_RECORD_HEADER_LENGTH + len);
+                    unsafe { buf.set_len(TLS_RECORD_HEADER_LENGTH + len) };
+                    debug_assert!(TLS_RECORD_HEADER_LENGTH + len <= buf.capacity());
+                    buf[..3].copy_from_slice(&[0x17, 0x03, 0x03]);
+                    buf[3..5].copy_from_slice(&(len as u16).to_be_bytes());
+                    rand::thread_rng()
+                        .fill(&mut buf[TLS_RECORD_HEADER_LENGTH..TLS_RECORD_HEADER_LENGTH + len]);
+                    stream.write_all(&buf).await?;
+                    trace!(len, "write dummy");
+                    read_tls_message(&mut stream, &mut buf)
+                        .await?
+                        .expect("TODO");
+                    if buf.len() < 5 + 48 {
+                        warn!(
+                            "Noise handshake {} <-> {} failed. Wrong key or time out of sync?",
+                            stream.local_addr().unwrap(),
+                            stream.peer_addr().unwrap()
+                        );
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Noise handshake failed due to message length shorter than expected",
+                        ));
+                    }
+                    pong[0..48].copy_from_slice(
+                        &buf[TLS_RECORD_HEADER_LENGTH..TLS_RECORD_HEADER_LENGTH + 48],
+                    );
+                    (&mut pong[0..32]).xored(&self._curve_point_mask);
+                }
             }
         }
 
-        // Noise: <- e, ee
-        let mut pong = Vec::with_capacity(5 + 48 + 24); // 0..24 random padding
-        read_tls_message(&mut stream, &mut pong)
-            .await?
-            .map_err(|_e| {
-                io::Error::new(io::ErrorKind::InvalidData, "First data frame not noise")
-            })?; // TODO: timeout
-        if pong.len() < 5 + 48 {
-            warn!(
-                "Noise handshake {} <-> {} failed. Wrong key or time out of sync?",
-                stream.local_addr().unwrap(),
-                stream.peer_addr().unwrap()
-            );
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Noise handshake failed due to message length shorter than expected",
-            ));
-        }
-        let e_ee: [u8; 48] = pong[5..5 + 48].try_into().unwrap(); // 32B pubkey + 16B AEAD tag
+        // let e_ee: [u8; 48] = pong[5..5 + 48].try_into().unwrap(); // 32B pubkey + 16B AEAD tag
         trace!(
-            pad_len = pong.len() - (5 + 48),
+            // pad_len = pong.len() - (5 + 48),
             "e, ee from {:?}: {:x?}",
             stream,
-            &e_ee
+            &pong
         );
         initiator
-            .read_message(&e_ee, &mut [])
+            .read_message(&pong, &mut [])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?; // TODO: allow recovery?
         let noise = initiator
             .into_transport_mode()
@@ -260,9 +331,14 @@ async fn tls12_handshake(
                     stream.peer_addr().unwrap(),
                     TlsContentType::from(buf[0]),
                 );
-                let n = tlsconn
+                let mut n = tlsconn
                     .read_tls(&mut io::Cursor::new(&mut buf[..5 + len]))
                     .unwrap();
+                if n < 5 + len {
+                    n += tlsconn
+                        .read_tls(&mut io::Cursor::new(&mut buf[n..5 + len]))
+                        .unwrap();
+                }
                 debug_assert_eq!(n, 5 + len);
                 tlsconn.process_new_packets().map_err(|e| {
                     debug!(
