@@ -1,16 +1,18 @@
 use lru::LruCache;
 use rand::Rng;
 use rustls::{HandshakeType, ProtocolVersion};
+use rustls::internal::msgs::message::{Message, MessageError, MessagePayload, OpaqueMessage};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
+// use once_cell::sync::OnceCell;
 use tracing::{debug, trace};
 
 use std::fmt::Debug;
 use std::io;
 use std::mem;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Mutex, Arc};
 
 use crate::common::{
     derive_psk, EarlyData, SnowyStream, NOISE_PARAMS, NO_ELLIGATOR_WORKAROUND, PSKLEN,
@@ -19,10 +21,11 @@ use crate::common::{
 use crate::totp::Totp;
 use crate::utils::{
     get_client_tls_versions, get_server_tls_version, hmac, parse_tls_plain_message,
-    read_tls_message, u16_from_be_slice, TlsMessageExt, Xor,
+    read_tls_message, u16_from_be_slice, TlsMessageExt, Xor
 };
 
 const SERVER_HELLO_RANDOM_START_INDEX: usize = TLS_RECORD_HEADER_LENGTH + 6;
+// const TLS13_SERVER_HELLO: &[u8] = hex!()
 
 /// Server with config to establish snowy tunnels with peer clients
 #[derive(Debug)]
@@ -32,6 +35,7 @@ pub struct Server<A: ToSocketAddrs + Debug> {
     pub replay_filter: Mutex<LruCache<[u8; 32], SocketAddr>>, // TODO: TOTP; prevent DoS attack
     pub totp: Totp,
     pub _curve_point_mask: [u8; 32],
+    // pub tls13_server_params: OnceCell<usize>,
 }
 
 impl<A: ToSocketAddrs + Debug> Server<A> {
@@ -49,6 +53,7 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
             replay_filter: Mutex::new(LruCache::new(replay_filter_size)),
             totp: Totp::new(key, 60, 2),
             _curve_point_mask: hmac(NO_ELLIGATOR_WORKAROUND, key),
+            // tls13_certlen: OnceCell::new(),
         }
     }
 
@@ -147,6 +152,26 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
             }
             rf.put(e, inbound.peer_addr().unwrap());
         }
+
+        // if client_tls1_3 {
+        //     match self.tls13_certlen.get().cloned()
+        //      {
+        //         Some((certlen)) => {
+        //             trace!("Using cached TLS13 server fingerprint");
+        //             match server_hello.as_server_hello_payload_mut() {
+        //                 Some(shp) => {
+                            
+        //                 },
+        //                 None => {
+
+        //                 }
+        //             }
+        //         },
+        //         None => {
+
+        //         }
+        //     }
+        // }
 
         let mut outbound = TcpStream::connect(&self.camouflage_addr).await?;
 
@@ -383,4 +408,9 @@ async fn relay_until_tls12_handshake_finished(
     a?;
     b?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct ServerParams {
+
 }
