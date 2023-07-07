@@ -6,7 +6,7 @@ use rustls::internal::msgs::codec::Codec;
 use rustls::internal::msgs::enums::{ExtensionType, NamedCurve};
 use rustls::internal::msgs::handshake::{
     ClientExtension, ConvertProtocolNameList, HandshakeMessagePayload, HandshakePayload,
-    KeyShareEntry, ProtocolNameList, UnknownExtension,
+    KeyShareEntry, ProtocolName, UnknownExtension,
 };
 use rustls::internal::msgs::message::{Message, MessagePayload};
 use rustls::{ProtocolVersion, SignatureScheme};
@@ -235,8 +235,7 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                     if !oldextmap.is_empty() && !drop_extensions_not_in_ja3 {
                         // there might be some extensions in CHP that are not present in ja3
                         trace!("ja3 overwriting: extension {:?} in original chp not present in ja3, appending to end: {}", oldextmap, !drop_extensions_not_in_ja3);
-                        new_extensions
-                            .extend(oldextmap.into_iter().map(|(_typ, ext)| ext.to_owned()));
+                        new_extensions.extend(oldextmap.into_values().map(|ext| ext.to_owned()));
                     }
                     chp.extensions = new_extensions;
                 }
@@ -300,7 +299,7 @@ pub fn overwrite_client_hello_with_fingerprint_spec(
                         try_assign!(
                             *alpn,
                             fp.alpn.as_ref().map(|alpn| {
-                                ProtocolNameList::from_slices(
+                                Vec::<ProtocolName>::from_slices(
                                     &alpn.iter().map(|proto| &proto[..]).collect::<Vec<_>>(),
                                 )
                             })

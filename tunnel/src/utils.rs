@@ -5,6 +5,7 @@ use rustls::internal::msgs::handshake::{
     ServerExtension, ServerHelloPayload,
 };
 use rustls::internal::msgs::message::{Message, MessageError, MessagePayload, OpaqueMessage};
+
 use rustls::{ContentType as TlsContentType, Error as RustlsError, ProtocolVersion};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 
@@ -93,31 +94,58 @@ pub async fn read_tls_message(
 ) -> io::Result<Result<(), MessageError>> {
     let mut header = [0xefu8; TLS_RECORD_HEADER_LENGTH];
     r.read_exact(&mut header).await?;
+
     let typ = TlsContentType::from(header[0]);
-    let ver = ProtocolVersion::from(u16_from_be_slice(&header[1..3]));
+    // Don't accept any new content-types.
+    if let TlsContentType::Unknown(_) = typ {
+        return Ok(Err(MessageError::InvalidContentType));
+    }
+
+    let version = ProtocolVersion::from(u16_from_be_slice(&header[1..3]));
+    // Accept only versions 0x03XX for any XX.
+    match version {
+        ProtocolVersion::Unknown(ref v) if (v & 0xff00) != 0x0300 => {
+            return Ok(Err(MessageError::UnknownProtocolVersion));
+        }
+        _ => {}
+    };
+
     let len = u16_from_be_slice(&header[3..5]) as usize;
+
     // Reject undersize messages
     //  implemented per section 5.1 of RFC8446 (TLSv1.3)
     //              per section 6.2.1 of RFC5246 (TLSv1.2)
     if typ != TlsContentType::ApplicationData && len == 0 {
-        return Ok(Err(MessageError::IllegalLength));
+        return Ok(Err(MessageError::InvalidEmptyPayload));
     }
+
     // Reject oversize messages
     if len >= MAXIMUM_CIPHERTEXT_LENGTH {
-        return Ok(Err(MessageError::IllegalLength));
+        return Ok(Err(MessageError::MessageTooLarge));
     }
-    // Don't accept any new content-types.
-    if let TlsContentType::Unknown(_) = typ {
-        return Ok(Err(MessageError::IllegalContentType));
-    }
-    match ver {
-        // actually TLS 1.1 should never be present; TLS1.0 may be present as a compatiblity trick
-        ProtocolVersion::TLSv1_0
-        | ProtocolVersion::TLSv1_1
-        | ProtocolVersion::TLSv1_2
-        | ProtocolVersion::TLSv1_3 => {}
-        _ => return Ok(Err(MessageError::IllegalProtocolVersion)),
-    }
+
+    // let mut sub = r
+    //     .sub(len as usize)
+    //     .map_err(|_| MessageError::TooShortForLength)?;
+    // let payload = Payload::read(&mut sub);
+
+    // let typ = TlsContentType::from(header[0]);
+    // let ver = ProtocolVersion::from(u16_from_be_slice(&header[1..3]));
+    // let len = u16_from_be_slice(&header[3..5]) as usize;
+    // // Reject undersize messages
+    // //  implemented per section 5.1 of RFC8446 (TLSv1.3)
+    // //              per section 6.2.1 of RFC5246 (TLSv1.2)
+    // if typ != TlsContentType::ApplicationData && len == 0 {
+    //     return Ok(Err(MessageError::TooShortForLength));
+    // }
+    // // Reject oversize messages
+    // if len >= MAXIMUM_CIPHERTEXT_LENGTH {
+    //     return Ok(Err(MessageError::IllegalLength));
+    // }
+    // // Don't accept any new content-types.
+    // if let TlsContentType::Unknown(_) = typ {
+    //     return Ok(Err(MessageError::IllegalContentType));
+    // }
 
     buf.reserve_exact((TLS_RECORD_HEADER_LENGTH + len).max(buf.len()) - buf.len());
     unsafe { buf.set_len(TLS_RECORD_HEADER_LENGTH + len) };
@@ -129,7 +157,7 @@ pub async fn read_tls_message(
 pub fn parse_tls_plain_message(buf: &[u8]) -> Result<Message, RustlsError> {
     OpaqueMessage::read(&mut Reader::init(buf))
         .map(|om| om.into_plain_message())
-        .map_err(|_e| RustlsError::CorruptMessage) // invalid header
+        .map_err(|_e| RustlsError::General(String::from("Invalid opaque message"))) // invalid header
         .and_then(Message::try_from)
 }
 

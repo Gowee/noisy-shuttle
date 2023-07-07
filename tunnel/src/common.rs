@@ -1,5 +1,6 @@
 use lazy_static::lazy_static;
-use rustls::internal::msgs::deframer::MessageDeframer;
+use rustls::internal::msgs::message::MessageError;
+use rustls::internal::msgs::{codec::Reader as RustlsCodecReader, message::OpaqueMessage};
 use snow::params::NoiseParams;
 use snow::TransportState;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -13,7 +14,7 @@ use std::io::{self};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::utils::{possibly_insecure_hash_with_key, SyncReadAdapter};
+use crate::utils::possibly_insecure_hash_with_key;
 
 lazy_static! {
     pub static ref NOISE_PARAMS: NoiseParams =
@@ -21,6 +22,7 @@ lazy_static! {
 }
 
 pub const TLS_RECORD_HEADER_LENGTH: usize = 5; // 1 type + 2 proto ver + 2 data len
+                                               // TODO: match TLS length limit?
 pub const MAXIMUM_CIPHERTEXT_LENGTH: usize = 2usize.pow(14); // 2**14 B = 16 KiB < show::constants::MAXMSGLEN
 pub const AEAD_TAG_LENGTH: usize = 16; // show::constants::TAGLEN
 pub const MAXIMUM_PLAINTEXT_LENGTH: usize = MAXIMUM_CIPHERTEXT_LENGTH - AEAD_TAG_LENGTH;
@@ -36,7 +38,11 @@ pub struct SnowyStream {
     pub(crate) socket: TcpStream,
     pub(crate) noise: TransportState,
     pub(crate) state: SnowyState,
-    pub(crate) tls_deframer: MessageDeframer,
+    // pub(crate) tls_deframer: MessageDeframer,
+    /// buffer read from raw socket without deframing or decrypting
+    pub(crate) pending_read_buffer: Box<[u8]>,
+    pub(crate) pending_read_filled: usize,
+    /// decrypted plaintext to be consumed by upper-layer app
     pub(crate) read_buffer: Vec<u8>,
     pub(crate) read_offset: usize,
     pub(crate) write_buffer: Vec<u8>,
@@ -48,11 +54,18 @@ impl SnowyStream {
     ///
     /// Generally, it is not intended to be used directly by external callers.
     pub fn new(io: TcpStream, noise: TransportState) -> Self {
+        // TODO: safe
+        let mut pending_read_buffer = vec![];
+        pending_read_buffer.reserve_exact(OpaqueMessage::MAX_WIRE_SIZE);
+        unsafe { pending_read_buffer.set_len(OpaqueMessage::MAX_WIRE_SIZE) };
+
         SnowyStream {
             socket: io,
             noise,
             state: SnowyState::Stream,
-            tls_deframer: Default::default(),
+            // tls_deframer: Default::default(),
+            pending_read_buffer: pending_read_buffer.into_boxed_slice(),
+            pending_read_filled: 0,
             read_buffer: Default::default(),
             read_offset: 0,
             write_buffer: Default::default(),
@@ -75,8 +88,12 @@ impl fmt::Debug for SnowyStream {
             .field("socket", &self.socket)
             .field("noise", &self.noise)
             .field("state", &self.state)
-            .field("tls_deframer.frames", &self.tls_deframer.frames)
-            .field("tls_deframer.desynced", &self.tls_deframer.desynced)
+            // .field("tls_deframer.frames", &self.tls_deframer.frames) // TODO: debug?
+            // .field("tls_deframer.desynced", &self.tls_deframer.desynced)
+            .field(
+                "pending_read_buffer",
+                &&self.pending_read_buffer[..self.pending_read_filled],
+            )
             .field("read_buffer", &&self.read_buffer[self.read_offset..])
             .field("write_buffer", &&self.write_buffer[self.write_offset..])
             .finish()
@@ -100,6 +117,7 @@ impl AsyncRead for SnowyStream {
                 // first, clean pending read_buffer
                 if this.read_offset < this.read_buffer.len() {
                     let len = cmp::min(this.read_buffer.len() - this.read_offset, buf.remaining());
+                    // trace!(buflen=len, "get ready buf");
                     buf.put_slice(&this.read_buffer[this.read_offset..this.read_offset + len]);
                     this.read_offset += len;
                     has_read |= len > 0;
@@ -114,41 +132,99 @@ impl AsyncRead for SnowyStream {
                 debug_assert_eq!(this.read_buffer.len(), 0);
 
                 // then, try to pop a ready TLS frame
-                if let Some(message) = this.tls_deframer.frames.pop_front() {
-                    // TODO: handle close notify
-                    if message.payload.0.is_empty() {
-                        continue;
+                // trace!(buflen=this.pending_read_filled, "Extracting a TLS frame from buffer");
+                let mut rd =
+                    RustlsCodecReader::init(&this.pending_read_buffer[..this.pending_read_filled]);
+                match OpaqueMessage::read(&mut rd) {
+                    Ok(message) => {
+                        // TODO: handle close notify
+                        let n = rd.used();
+                        debug_assert!(n <= this.pending_read_filled);
+                        this.pending_read_buffer
+                            .copy_within(n..this.pending_read_filled, 0);
+                        this.pending_read_filled -= n;
+                        if message.payload.0.is_empty() {
+                            continue;
+                        }
+                        debug_assert_eq!(this.read_offset, 0);
+                        this.read_buffer
+                            .reserve_exact(MAXIMUM_PLAINTEXT_LENGTH - this.read_buffer.capacity());
+                        unsafe { this.read_buffer.set_len(MAXIMUM_PLAINTEXT_LENGTH) };
+                        // ensure message payload no empty, o.w. mysterious Decrypt error may be resulted
+                        let len = this
+                            .noise
+                            .read_message(&message.payload.0, &mut this.read_buffer)
+                            .map_err(|e| {
+                                debug!(
+                                    "Noise read error on {:?}, message: {:#?}",
+                                    this.socket, message
+                                );
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("Noise failed to read message: {}", e),
+                                )
+                            })?;
+                        this.read_buffer.truncate(len);
+                        trace!(
+                            pldlen = message.payload.0.len(),
+                            plainlen = len,
+                            "tls message ready for {:?}, type: {:?}, version: {:?}",
+                            this.socket,
+                            message.typ,
+                            message.version,
+                        );
                     }
-                    this.read_buffer
-                        .reserve_exact(MAXIMUM_PLAINTEXT_LENGTH - this.read_buffer.capacity());
-                    unsafe { this.read_buffer.set_len(MAXIMUM_PLAINTEXT_LENGTH) };
-                    // ensure message payload no empty, o.w. mysterious Decrypt error may be resulted
-                    let len = this
-                        .noise
-                        .read_message(&message.payload.0, &mut this.read_buffer)
-                        .map_err(|e| {
-                            debug!(
-                                "noise read error on {:?}, message: {:#?}",
-                                this.socket, message
-                            );
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!("Noise failed to read message: {}", e),
-                            )
-                        })?;
-                    this.read_buffer.truncate(len);
-                    trace!(
-                        pldlen = message.payload.0.len(),
-                        plainlen = len,
-                        "tls message ready for {:?}, type: {:?}, version: {:?}",
-                        this.socket,
-                        message.typ,
-                        message.version,
-                    );
-                } else {
-                    // no ready tls frame, proceed to read the inner socket
-                    break 'read_ready;
+                    Err(MessageError::TooShortForHeader) | Err(MessageError::TooShortForLength) => {
+                        // no ready tls frame, proceed to read the inner socket
+                        // trace!("No TLS frame ready");
+                        break 'read_ready;
+                    }
+                    Err(err) => {
+                        // TODO: properly handle and alert?
+                        debug!("Invalid TLS frame on {:?}: {:?}", this.socket, err);
+                        this.state.shutdown_read();
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Invalid TLS frame",
+                        )));
+                    }
                 }
+
+                // if let Some(message) = this.tls_deframer.pop() {
+                //     // TODO: handle close notify
+                //     if message.payload.0.is_empty() {
+                //         continue;
+                //     }
+                //     this.read_buffer
+                //         .reserve_exact(MAXIMUM_PLAINTEXT_LENGTH - this.read_buffer.capacity());
+                //     unsafe { this.read_buffer.set_len(MAXIMUM_PLAINTEXT_LENGTH) };
+                //     // ensure message payload no empty, o.w. mysterious Decrypt error may be resulted
+                //     let len = this
+                //         .noise
+                //         .read_message(&message.payload.0, &mut this.read_buffer)
+                //         .map_err(|e| {
+                //             debug!(
+                //                 "noise read error on {:?}, message: {:#?}",
+                //                 this.socket, message
+                //             );
+                //             io::Error::new(
+                //                 io::ErrorKind::InvalidData,
+                //                 format!("Noise failed to read message: {}", e),
+                //             )
+                //         })?;
+                //     this.read_buffer.truncate(len);
+                //     trace!(
+                //         pldlen = message.payload.0.len(),
+                //         plainlen = len,
+                //         "tls message ready for {:?}, type: {:?}, version: {:?}",
+                //         this.socket,
+                //         message.typ,
+                //         message.version,
+                //     );
+                // } else {
+                //     // no ready tls frame, proceed to read the inner socket
+                //     break 'read_ready;
+                // }
             }
             // Note: the best practice is to be conservative on making syscalls
             // so here prefer to return progress if any, over proceeding to read the inner socket
@@ -156,38 +232,34 @@ impl AsyncRead for SnowyStream {
                 break 'read_more;
             }
             // otherwise, read the underlying socket
-            match this.tls_deframer.read(&mut SyncReadAdapter {
-                io: &mut this.socket,
-                cx,
-            }) {
-                Ok(n) => {
-                    if n == 0 {
-                        // per trait's doc:
-                        //    If no data was read (buf.filled().len() is unchanged), it implies
-                        //    that EOF has been reached.
-                        this.state.shutdown_read();
-                        if this.tls_deframer.has_pending() {
+            // trace!(prev_buflen=this.pending_read_filled, "Reading socket");
+            let mut buf = ReadBuf::new(&mut this.pending_read_buffer[this.pending_read_filled..]);
+            match Pin::new(&mut this.socket).poll_read(cx, &mut buf) {
+                Poll::Ready(Ok(())) => {
+                    // per trait's doc:
+                    //    If no data was read (buf.filled().len() is unchanged), it implies
+                    //    that EOF has been reached.
+                    if buf.filled().is_empty() {
+                        if this.pending_read_filled > 0 {
                             // ready frames in tls_deframer has been drained before reaching here
                             // so pending indicates uncompleted frame
-                            debug_assert!(this.tls_deframer.frames.is_empty());
-                            trace!(this.tls_deframer.desynced);
+                            // trace!(this.pending_read_filled);
                             return Poll::Ready(Err(io::Error::new(
                                 io::ErrorKind::UnexpectedEof,
-                                "Underlaying socket EoF when a TLS frame half-read",
+                                "Underlaying socket reaches EoF when a TLS frame half-read",
                             )));
                         }
                         break 'read_more;
                     }
+                    this.pending_read_filled += buf.filled().len();
+                    // trace!(buflen_diff=buf.filled().len(), buflen=this.pending_read_filled, "Read socket done");
                     // proceed to parse TLS frames
                 }
-                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    return Poll::Pending;
-                }
-                Err(err) => {
-                    // TODO: what are we doing here?
-                    //   will caller call poll_read for a second time after a fatal error at all?
+                Poll::Ready(Err(err)) => {
+                    // TODO: is this necessary?
+                    //       would caller call poll_read for a second time after a fatal error at all?
                     match err.kind() {
-                        // ErrorKind are copied are tokio-rustls. Why do not we handle other errors?
+                        // ErrorKind are copied from tokio-rustls. Why do not we handle other errors?
                         io::ErrorKind::ConnectionAborted | io::ErrorKind::UnexpectedEof => {
                             this.state.shutdown_read();
                         }
@@ -196,7 +268,51 @@ impl AsyncRead for SnowyStream {
                     debug!("read socket error on {:?}: {:?}", this, err);
                     return Poll::Ready(Err(err));
                 }
+                Poll::Pending => {
+                    return Poll::Pending;
+                }
             }
+            // match this.tls_deframer.read(&mut SyncReadAdapter {
+            //     io: &mut this.socket,
+            //     cx,
+            // }) {
+            //     Ok(n) => {
+            //         if n == 0 {
+            //             // per trait's doc:
+            //             //    If no data was read (buf.filled().len() is unchanged), it implies
+            //             //    that EOF has been reached.
+            //             this.state.shutdown_read();
+            //             if this.tls_deframer.has_pending() {
+            //                 // ready frames in tls_deframer has been drained before reaching here
+            //                 // so pending indicates uncompleted frame
+            //                 debug_assert!(this.tls_deframer.frames.is_empty());
+            //                 trace!(this.tls_deframer.desynced);
+            //                 return Poll::Ready(Err(io::Error::new(
+            //                     io::ErrorKind::UnexpectedEof,
+            //                     "Underlaying socket reaches EoF when a TLS frame half-read",
+            //                 )));
+            //             }
+            //             break 'read_more;
+            //         }
+            //         // proceed to parse TLS frames
+            //     }
+            //     Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+            //         return Poll::Pending;
+            //     }
+            //     Err(err) => {
+            //         // TODO: what are we doing here?
+            //         //   will caller call poll_read for a second time after a fatal error at all?
+            //         match err.kind() {
+            //             // ErrorKind are copied are tokio-rustls. Why do not we handle other errors?
+            //             io::ErrorKind::ConnectionAborted | io::ErrorKind::UnexpectedEof => {
+            //                 this.state.shutdown_read();
+            //             }
+            //             _ => {}
+            //         }
+            //         debug!("read socket error on {:?}: {:?}", this, err);
+            //         return Poll::Ready(Err(err));
+            //     }
+            // }
         }
         Poll::Ready(Ok(()))
     }

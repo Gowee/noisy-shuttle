@@ -47,7 +47,7 @@ impl Totp {
     pub fn check<const N: usize>(&self, token: &[u8; N], time: u64) -> bool {
         let basestep = time / self.step - (self.skew as u64);
         for i in 0..=self.skew * 2 {
-            let step_time = (basestep + (i as u64)) * (self.step as u64);
+            let step_time = (basestep + (i as u64)) * self.step;
             if &self.generate(step_time) == token {
                 return true;
             }
@@ -69,7 +69,7 @@ impl Totp {
         let nonce = nonce.as_ref();
         let basestep = time / self.step - (self.skew as u64);
         for i in 0..=self.skew * 2 {
-            let step_time = (basestep + (i as u64)) * (self.step as u64);
+            let step_time = (basestep + (i as u64)) * self.step;
             if &self.sign(step_time, nonce) == sig {
                 return true;
             }

@@ -26,7 +26,7 @@ use super::common::{
     PSKLEN, TLS_RECORD_HEADER_LENGTH,
 };
 
-/// Client with config to establish snowy tunnels with peer servers
+/// Client with config to establish snowy tunnels with a peer server
 #[derive(Debug, Clone)]
 pub struct Client {
     pub key: [u8; PSKLEN],
@@ -114,7 +114,9 @@ impl Client {
             Arc::new(tlsconf.clone()),
             self.server_name.clone(),
             random.into(),
-            session_id.as_slice().into(),
+            Some(session_id.as_slice().into()),
+            None,
+            None,
             chwriter,
         )
         .expect("TLS config valid");
