@@ -2,8 +2,7 @@
 
 members = [
     "tunnel",
-    "shuttle",
-    "h2mux"
+    "shuttle"
 ]
 
 [patch.crates-io]
