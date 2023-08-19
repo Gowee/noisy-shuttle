@@ -23,13 +23,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{self, Poll};
-use std::time::{Duration, Instant};
 
 use h2::{Ping, PingPong};
+use tokio::time::{Duration, Instant};
 use tracing::{debug, trace};
-
-use crate::common::time::Time;
-use crate::rt::Sleep;
 
 type WindowSize = u32;
 
@@ -37,7 +34,7 @@ pub(super) fn disabled() -> Recorder {
     Recorder { shared: None }
 }
 
-pub(super) fn channel(ping_pong: PingPong, config: Config, __timer: Time) -> (Recorder, Ponger) {
+pub(super) fn channel(ping_pong: PingPong, config: Config) -> (Recorder, Ponger) {
     debug_assert!(
         config.is_enabled(),
         "ping channel requires bdp or keep-alive config",
@@ -61,9 +58,8 @@ pub(super) fn channel(ping_pong: PingPong, config: Config, __timer: Time) -> (Re
         interval,
         timeout: config.keep_alive_timeout,
         while_idle: config.keep_alive_while_idle,
-        sleep: __timer.sleep(interval),
+        sleep: Box::pin(tokio::time::sleep(interval)),
         state: KeepAliveState::Init,
-        timer: __timer,
     });
 
     let last_read_at = keep_alive.as_ref().map(|_| Instant::now());
@@ -156,8 +152,7 @@ struct KeepAlive {
     /// If true, sends pings even when there are no active streams.
     while_idle: bool,
     state: KeepAliveState,
-    sleep: Pin<Box<dyn Sleep>>,
-    timer: Time,
+    sleep: Pin<Box<tokio::time::Sleep>>,
 }
 
 enum KeepAliveState {
@@ -242,7 +237,7 @@ impl Recorder {
         }
     }
 
-    pub(super) fn ensure_not_timed_out(&self) -> crate::Result<()> {
+    pub(super) fn ensure_not_timed_out(&self) -> Result<(), crate::Error> {
         if let Some(ref shared) = self.shared {
             let locked = shared.lock().unwrap();
             if locked.is_keep_alive_timed_out {
@@ -446,13 +441,13 @@ impl KeepAlive {
     fn schedule(&mut self, shared: &Shared) {
         let interval = shared.last_read_at() + self.interval;
         self.state = KeepAliveState::Scheduled(interval);
-        self.timer.reset(&mut self.sleep, interval);
+        self.sleep.as_mut().reset(interval);
     }
 
     fn maybe_ping(&mut self, cx: &mut task::Context<'_>, shared: &mut Shared) {
         match self.state {
             KeepAliveState::Scheduled(at) => {
-                if Pin::new(&mut self.sleep).poll(cx).is_pending() {
+                if self.sleep.as_mut().poll(cx).is_pending() {
                     return;
                 }
                 // check if we've received a frame while we were scheduled
@@ -465,7 +460,7 @@ impl KeepAlive {
                 shared.send_ping();
                 self.state = KeepAliveState::PingSent;
                 let timeout = Instant::now() + self.timeout;
-                self.timer.reset(&mut self.sleep, timeout);
+                self.sleep.as_mut().reset(timeout);
             }
             KeepAliveState::Init | KeepAliveState::PingSent => (),
         }
@@ -474,7 +469,7 @@ impl KeepAlive {
     fn maybe_timeout(&mut self, cx: &mut task::Context<'_>) -> Result<(), KeepAliveTimedOut> {
         match self.state {
             KeepAliveState::PingSent => {
-                if Pin::new(&mut self.sleep).poll(cx).is_pending() {
+                if self.sleep.as_mut().poll(cx).is_pending() {
                     return Ok(());
                 }
                 trace!("keep-alive timeout ({:?}) reached", self.timeout);
@@ -489,7 +484,7 @@ impl KeepAlive {
 
 impl KeepAliveTimedOut {
     pub(super) fn crate_error(self) -> crate::Error {
-        crate::Error::new(crate::error::Kind::Http2).with(self)
+        crate::Error::KeepAliveTimedOut
     }
 }
 
@@ -499,8 +494,8 @@ impl fmt::Display for KeepAliveTimedOut {
     }
 }
 
-impl std::error::Error for KeepAliveTimedOut {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&crate::error::TimedOut)
-    }
-}
+// impl std::error::Error for KeepAliveTimedOut {
+//     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+//         Some(&crate::error::TimedOut)
+//     }
+// }

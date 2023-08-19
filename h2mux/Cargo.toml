@@ -9,5 +9,6 @@ edition = "2021"
 bytes = "1.4.0"
 h2 = "0.3"
 http = "0.2.9"
-tokio = "1.29"
+tokio = { version = "1.29", features = ["time"] }
+thiserror = "1.0"
 tracing = "0.1.37"
