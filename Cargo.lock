@@ -585,6 +585,7 @@ dependencies = [
  "bytes",
  "h2",
  "http",
+ "thiserror",
  "tokio",
  "tracing",
 ]
@@ -798,9 +799,11 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "clap 3.2.25",
  "deadqueue",
  "futures",
+ "h2mux",
  "httparse",
  "ja3-rustls",
  "lru",

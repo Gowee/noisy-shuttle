@@ -1,5 +1,6 @@
 use anyhow::{anyhow, ensure, Context, Result};
 
+use h2mux::client::PendingStream;
 use socks5::sync::FromIO;
 use socks5_protocol as socks5;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -295,12 +296,12 @@ async fn handle_connection_http(
 
 // TODO: bullshit API design
 #[instrument(name = "tcp_relay", skip(inbound, outbound, outbuf), fields(
-    %local_out = outbound.as_inner().local_addr().unwrap(),
+    // %local_out = outbound.as_inner().local_addr().unwrap(),
     // %remote = outbound.as_inner().peer_addr().unwrap(),
 ))]
 async fn relay_tcp_with(
     mut inbound: &mut TcpStream,
-    mut outbound: &mut SnowyStream,
+    mut outbound: &mut PendingStream,
     outbuf: Option<Vec<u8>>,
 ) -> Result<(u64, u64)> {
     debug!(outbuf_len = outbuf.as_ref().map(|b| b.len()), "starting");
@@ -339,13 +340,13 @@ async fn relay_tcp_with(
 #[instrument(name = "udp_relay", skip(inbound_tcp, inbound, outbound, header), fields(
     %client_udp_nominal = header.dest_addr,
     %local_in_udp = inbound.local_addr().unwrap(),
-    %local_out = outbound.as_inner().local_addr().unwrap(),
+    // %local_out = outbound.as_inner().local_addr().unwrap(),
     // %remote = outbound.as_inner().peer_addr().unwrap(),
 ))]
 async fn relay_udp_with(
     inbound_tcp: &mut TcpStream,
     inbound: &mut UdpSocket,
-    outbound: &mut SnowyStream,
+    outbound: &mut PendingStream,
     header: TrojanLikeRequest,
 ) -> Result<(u64, u64)> {
     debug!("starting");

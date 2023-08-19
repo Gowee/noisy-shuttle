@@ -59,42 +59,61 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
     use snowy_tunnel::AcceptError::*;
     match server.accept(inbound).await {
         Ok(mut snowys) => {
-            use crate::trojan::Cmd::*;
-            let req = read_trojan_like_request(&mut snowys)
-                .await
-                .context("failed to read request header")?;
-            info!(command=?req.cmd, dest_addr=%req.dest_addr, "accepting request");
+            let mut h2conn = h2mux::server::handshake(snowys).await?;
+            while let Some(stream) = h2conn.accept().await {
+                match stream {
+                    Ok(mut snowys) => {
+                        tokio::spawn(async move {
+                            use crate::trojan::Cmd::*;
+                            let req = read_trojan_like_request(&mut snowys)
+                                .await
+                                .context("failed to read request header")?;
+                            info!(command=?req.cmd, dest_addr=%req.dest_addr, "accepting request");
 
-            match req.cmd {
-                Connect => {
-                    let mut outbound = call_with_addr!(TcpStream::connect, req.dest_addr)
-                        .context("failed to connect to remote")?;
-                    debug!(
-                        local_out = outbound.local_addr().unwrap().to_string(),
-                        remote = outbound.peer_addr().unwrap().to_string(),
-                        "starting tcp relay"
-                    );
-                    match tokio::io::copy_bidirectional(&mut snowys, &mut outbound).await {
-                        Ok((tx, rx)) => info!(tx, rx, "relay closed"),
-                        Err(error) => warn!(?error, "relay terminated"),
+                            if false {
+                                return Result::Err(anyhow::anyhow!("annotating types"));
+                            }
+
+                            match req.cmd {
+                                Connect => {
+                                    let mut outbound =
+                                        call_with_addr!(TcpStream::connect, req.dest_addr)
+                                            .context("failed to connect to remote")?;
+                                    debug!(
+                                        local_out = outbound.local_addr().unwrap().to_string(),
+                                        remote = outbound.peer_addr().unwrap().to_string(),
+                                        "starting tcp relay"
+                                    );
+                                    match tokio::io::copy_bidirectional(&mut snowys, &mut outbound)
+                                        .await
+                                    {
+                                        Ok((tx, rx)) => info!(tx, rx, "relay closed"),
+                                        Err(error) => warn!(?error, "relay terminated"),
+                                    }
+                                    Ok(())
+                                }
+                                UdpAssociate => {
+                                    // do not connect, allowing UDP punching
+                                    let mut outbound = UdpSocket::bind("0.0.0.0:0").await?;
+                                    debug!(
+                                        local_out = outbound.local_addr().unwrap().to_string(),
+                                        remote = req.dest_addr.to_string(),
+                                        "starting udp relay"
+                                    );
+                                    match relay_udp(&mut snowys, &mut outbound).await {
+                                        Ok((tx, rx)) => info!(tx, rx, "relay udp closed"),
+                                        Err(error) => warn!(?error, "relay udp terminated"),
+                                    }
+                                    Ok(())
+                                } // Bind => return Err(io::Error::new(io::ErrorKind::Other, "Bind command not supported"))
+                            }
+                        });
                     }
-                    Ok(())
+                    Err(e) => warn!("h2conn error: {:?}", e),
                 }
-                UdpAssociate => {
-                    // do not connect, allowing UDP punching
-                    let mut outbound = UdpSocket::bind("0.0.0.0:0").await?;
-                    debug!(
-                        local_out = outbound.local_addr().unwrap().to_string(),
-                        remote = req.dest_addr.to_string(),
-                        "starting udp relay"
-                    );
-                    match relay_udp(&mut snowys, &mut outbound).await {
-                        Ok((tx, rx)) => info!(tx, rx, "relay udp closed"),
-                        Err(error) => warn!(?error, "relay udp terminated"),
-                    }
-                    Ok(())
-                } // Bind => return Err(io::Error::new(io::ErrorKind::Other, "Bind command not supported"))
             }
+
+            Ok(())
         }
         Err(IoError(e)) => Err(e).context("failed to accept connection"),
         Err(e) => {
@@ -161,7 +180,7 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
 /// Relay traffic between the incoming stream and the outbound UdpSocket
 #[instrument(name = "udp_relay", skip(inbound, outbound), fields(local_out_udp=%outbound.local_addr().unwrap()))]
 async fn relay_udp(
-    inbound: &mut SnowyStream,
+    inbound: &mut h2mux::H2Upgraded<bytes::Bytes>,
     outbound: &mut UdpSocket,
 ) -> io::Result<(usize, usize)> {
     // SnowyStream buffers read internally but not write.
