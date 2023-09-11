@@ -1,3 +1,6 @@
+// Ported from hyper::proto::h2::ping (licensed under MIT)
+// https://github.com/hyperium/hyper/blob/8790fee74937016e6b288493bc62c61f7866c310/src/proto/h2/ping.rs
+
 /// HTTP2 Ping usage
 ///
 /// hyper uses HTTP2 pings for two purposes:
@@ -181,6 +184,7 @@ impl Config {
 
 impl Recorder {
     pub(crate) fn record_data(&self, len: usize) {
+        // tracing::debug!(len, "recording");
         let shared = if let Some(ref shared) = self.shared {
             shared
         } else {
@@ -196,6 +200,7 @@ impl Recorder {
 
         if let Some(ref next_bdp_at) = locked.next_bdp_at {
             if Instant::now() < *next_bdp_at {
+                // tracing::debug!(until = (*next_bdp_at - Instant::now()).as_millis());
                 return;
             } else {
                 locked.next_bdp_at = None;
@@ -204,6 +209,7 @@ impl Recorder {
 
         if let Some(ref mut bytes) = locked.bytes {
             *bytes += len;
+            // tracing::debug!(bytes);
         } else {
             // no need to send bdp ping if bdp is disabled
             return;
@@ -399,11 +405,11 @@ impl Bdp {
     }
 
     fn stabilize_delay(&mut self) {
-        if self.ping_delay < Duration::from_secs(10) {
+        if self.ping_delay < Duration::from_secs(2) {
             self.stable_count += 1;
 
-            if self.stable_count >= 2 {
-                self.ping_delay *= 4;
+            if self.stable_count >= 4 {
+                self.ping_delay *= 2;
                 self.stable_count = 0;
             }
         }

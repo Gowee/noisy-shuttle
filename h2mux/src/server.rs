@@ -90,10 +90,16 @@ pub async fn handshake<IO: AsyncRead + AsyncWrite + Unpin>(
         pp,
         ping::Config {
             bdp_initial_window: Some(1024 * 1024),
-            keep_alive_interval: Some(std::time::Duration::from_secs(1)),
-            keep_alive_timeout: std::time::Duration::from_secs(2),
+            keep_alive_interval: Some(std::time::Duration::from_secs(5)),
+            keep_alive_timeout: std::time::Duration::from_secs(20),
             keep_alive_while_idle: false,
         },
     );
     Ok(Connection { conn, ping, ponger })
 }
+
+// pub trait H2MuxBuilder {
+//     fn handshake_h2mux<T>(&self, io: T) -> HandshakeMux<T> {
+
+//     }
+// }

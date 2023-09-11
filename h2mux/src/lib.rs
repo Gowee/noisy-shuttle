@@ -29,6 +29,9 @@ mod utils;
 pub use crate::stream::H2Upgraded;
 use crate::utils::H2MapIoErr;
 
+/// hyper::proto::h2: Default initial stream window size defined in HTTP2 spec.
+const SPEC_WINDOW_SIZE: u32 = 65_535;
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("h2 layer error")]

@@ -16,6 +16,7 @@ use http::response::Parts;
 use http::{request, HeaderMap, Request};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::time::Duration;
 use tracing::{debug, info, trace, warn};
 
 use crate::ping::{self, Ponged, Recorder};
@@ -23,6 +24,7 @@ use crate::stream::{
     poll_read, poll_shutdown, poll_write, H2Upgraded, SendBuf, UpgradedSendStream,
 };
 use crate::utils::H2MapIoErr;
+use crate::SPEC_WINDOW_SIZE;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -36,12 +38,21 @@ pub enum Error {
 
 pub struct Connection<IO: AsyncRead + AsyncWrite + Unpin> {
     conn: h2::client::Connection<IO, SendBuf<Bytes>>,
-    ponger: ping::Ponger,
+    ponger: Option<ping::Ponger>,
 }
 
 pub struct Control {
     send_request: SendRequest<SendBuf<Bytes>>,
     ping: Recorder,
+}
+
+#[derive(Clone, Debug)]
+pub struct Builder {
+    proto_builder: h2::client::Builder,
+    adaptive_window: bool,
+    keep_alive_interval: Option<Duration>,
+    keep_alive_timeout: Duration,
+    keep_alive_while_idle: bool,
 }
 
 pub struct PendingStream(EPendingStream);
@@ -56,18 +67,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Future for Connection<IO> {
     type Output = Result<(), crate::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.ponger.poll(cx) {
-            Poll::Ready(Ponged::SizeUpdate(wnd)) => {
-                info!(wnd = wnd, "New window size calculated");
-                self.conn.set_target_window_size(wnd);
-                self.conn.set_initial_window_size(wnd)?;
+        if let Some(ponger) = &mut self.ponger {
+            match ponger.poll(cx) {
+                Poll::Ready(Ponged::SizeUpdate(wnd)) => {
+                    info!(wnd = wnd, "New window size calculated");
+                    self.conn.set_target_window_size(wnd);
+                    self.conn.set_initial_window_size(wnd)?;
+                }
+                Poll::Ready(Ponged::KeepAliveTimedOut) => {
+                    warn!("h2 keep-alive timed out");
+                    // TODO: close conn here?
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Pending => {}
             }
-            Poll::Ready(Ponged::KeepAliveTimedOut) => {
-                warn!("h2 keep-alive timed out");
-                // TODO: close conn here?
-                return Poll::Ready(Ok(()));
-            }
-            Poll::Pending => {}
         }
 
         Pin::new(&mut self.conn).poll(cx).map_err(|e| e.into())
@@ -85,6 +98,112 @@ impl Control {
             response_fut,
             self.ping.clone(),
         )))
+    }
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self {
+            proto_builder: Default::default(),
+            adaptive_window: false,
+            keep_alive_interval: None,
+            keep_alive_timeout: Duration::from_secs(20),
+            keep_alive_while_idle: false,
+        }
+    }
+}
+
+// Some methods are ported from hyper (licensed under MIT).
+impl Builder {
+    pub fn new(proto_builder: h2::client::Builder) -> Self {
+        Self {
+            proto_builder,
+            ..Default::default()
+        }
+    }
+
+    /// Sets whether to use an adaptive flow control.
+    ///
+    /// Enabling this will override the limits set in
+    /// `initial_stream_window_size` and
+    /// `initial_connection_window_size`.
+    pub fn adaptive_window(&mut self, enabled: bool) -> &mut Self {
+        self.adaptive_window = enabled;
+        if enabled {
+            self.proto_builder
+                .initial_connection_window_size(SPEC_WINDOW_SIZE);
+            self.proto_builder.initial_window_size(SPEC_WINDOW_SIZE);
+        }
+        self
+    }
+
+    /// Sets an interval for HTTP2 Ping frames should be sent to keep a
+    /// connection alive.
+    ///
+    /// Pass `None` to disable HTTP2 keep-alive.
+    ///
+    /// Default is currently disabled.
+    pub fn keep_alive_interval(&mut self, interval: impl Into<Option<Duration>>) -> &mut Self {
+        self.keep_alive_interval = interval.into();
+        self
+    }
+
+    /// Sets a timeout for receiving an acknowledgement of the keep-alive ping.
+    ///
+    /// If the ping is not acknowledged within the timeout, the connection will
+    /// be closed. Does nothing if `keep_alive_interval` is disabled.
+    ///
+    /// Default is 20 seconds.
+    pub fn keep_alive_timeout(&mut self, timeout: Duration) -> &mut Self {
+        self.keep_alive_timeout = timeout;
+        self
+    }
+
+    /// Sets whether HTTP2 keep-alive should apply while the connection is idle.
+    ///
+    /// If disabled, keep-alive pings are only sent while there are open
+    /// request/responses streams. If enabled, pings are also sent when no
+    /// streams are active. Does nothing if `keep_alive_interval` is
+    /// disabled.
+    ///
+    /// Default is `false`.
+    pub fn keep_alive_while_idle(&mut self, enabled: bool) -> &mut Self {
+        self.keep_alive_while_idle = enabled;
+        self
+    }
+
+    pub async fn handshake<IO: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        io: IO,
+    ) -> Result<(Control, Connection<IO>), Error> {
+        let (send_request, mut conn) = self
+            .proto_builder
+            .handshake::<_, SendBuf<Bytes>>(io)
+            .await?;
+        debug!("h2 handshaked");
+
+        let ping_config = ping::Config {
+            bdp_initial_window: if self.adaptive_window {
+                debug!(initial = SPEC_WINDOW_SIZE, "adaptive window activated");
+                Some(SPEC_WINDOW_SIZE)
+            } else {
+                None
+            },
+            keep_alive_interval: self.keep_alive_interval,
+            keep_alive_timeout: self.keep_alive_timeout,
+            keep_alive_while_idle: self.keep_alive_while_idle,
+        };
+
+        let (ping, ponger) = if ping_config.is_enabled() {
+            let pp = conn.ping_pong().unwrap();
+            let (ping, ponger) = ping::channel(pp, ping_config);
+            (ping, Some(ponger))
+        } else {
+            (ping::disabled(), None)
+        };
+
+        let connection = Connection { conn, ponger };
+        Ok((Control { send_request, ping }, connection))
     }
 }
 
@@ -226,21 +345,11 @@ impl AsyncWrite for PendingStream {
 pub async fn handshake<IO: AsyncRead + AsyncWrite + Unpin>(
     io: IO,
 ) -> Result<(Control, Connection<IO>), Error> {
-    let (send_request, mut conn) = h2::client::Builder::new()
-        .handshake::<_, SendBuf<Bytes>>(io)
-        .await?;
-    debug!("h2 handshaked");
-    let pp = conn.ping_pong().unwrap();
-    // TODO: configurable
-    let (ping, ponger) = ping::channel(
-        pp,
-        ping::Config {
-            bdp_initial_window: Some(1024 * 1024),
-            keep_alive_interval: Some(std::time::Duration::from_secs(1)),
-            keep_alive_timeout: std::time::Duration::from_secs(2),
-            keep_alive_while_idle: true,
-        },
-    );
-    let connection = Connection { conn, ponger };
-    Ok((Control { send_request, ping }, connection))
+    Builder::default()
+        .adaptive_window(true)
+        .keep_alive_interval(Some(Duration::from_secs(5)))
+        .keep_alive_timeout(Duration::from_secs(20))
+        .keep_alive_while_idle(true)
+        .handshake(io)
+        .await
 }
