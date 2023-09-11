@@ -109,7 +109,10 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
                             }
                         });
                     }
-                    Err(e) => warn!("h2conn error: {:?}", e),
+                    Err(e) => {
+                        warn!("h2conn terminated with error: {:?}", e);
+                        break;
+                    }
                 }
             }
 

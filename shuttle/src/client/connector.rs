@@ -234,14 +234,17 @@ impl H2MuxConnector {
 #[async_trait]
 impl Connector for H2MuxConnector {
     async fn connect(&self) -> io::Result<h2mux::client::PendingStream> {
-        let s = TcpStream::connect(self.remote_addr.as_str()).await?;
-        let s = self.client.connect(s).await?;
-
-        let mut control = self.control.lock().await;
-        let control: &mut h2mux::client::Control = match control.as_mut() {
+        debug!("start to connect");
+        let mut locked = self.control.lock().await;
+        let control: &mut h2mux::client::Control = match locked.as_mut() {
             Some(c) => c,
             None => {
-                let (ctrl, conn) = h2mux::client::handshake(s)
+                debug!("connect to remote");
+                let s = TcpStream::connect(self.remote_addr.as_str()).await?;
+                debug!("noise handshake");
+                let s = self.client.connect(s).await?;
+                debug!("initiate new h2 conn");
+                let (control, conn) = h2mux::client::handshake(s)
                     .await
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 debug!("h2 conn ready");
@@ -250,15 +253,15 @@ impl Connector for H2MuxConnector {
                     debug!("h2 connection terminated {:?}", r);
                 });
 
-                assert!(control.replace(ctrl).is_none());
-                control.as_mut().unwrap()
+                assert!(locked.replace(control).is_none());
+                locked.as_mut().unwrap()
             }
         };
         match control.open_stream(Default::default()).await {
             Ok(s) => Ok(s),
             Err(e) => {
-                self.control.lock().await.take().unwrap();
                 warn!("discard h2 conn due to {:?}", e);
+                locked.take().unwrap();
                 Err(io::Error::new(io::ErrorKind::Other, e))
             }
         }
