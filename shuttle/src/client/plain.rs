@@ -397,7 +397,7 @@ async fn relay_udp_with(
             orig_addr
                 .write_to(&mut Cursor::new(&mut buf[3..3 + addrlen]))
                 .unwrap();
-            inbound.send(&buf[..n + addrlen]).await?;
+            inbound.send(&buf[..3 + n + addrlen]).await?;
             rx += n as u64;
         }
     };

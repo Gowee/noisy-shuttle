@@ -249,10 +249,16 @@ async fn tls12_handshake(
                     stream.peer_addr().unwrap(),
                     TlsContentType::from(buf[0]),
                 );
-                let n = tlsconn
-                    .read_tls(&mut io::Cursor::new(&mut buf[..5 + len]))
-                    .unwrap();
-                debug_assert_eq!(n, 5 + len);
+                // rustls reads at most 4k for once, while it accepts 16k at most if feed multiple times.
+                // ref: https://github.com/rustls/rustls/blob/1164380b2e40a1db8b3909323581bd2647d82b0c/rustls/src/msgs/deframer.rs#L295
+                let mut i = 0;
+                while i < 5 + len {
+                    let n = tlsconn
+                        .read_tls(&mut io::Cursor::new(&mut buf[i..5 + len]))
+                        .unwrap();
+                    assert!(n > 0, "TLS feed zero");
+                    i += n;
+                }
                 tlsconn.process_new_packets().map_err(|e| {
                     debug!(
                         "tls state error when handshaking {} <-> {}: {:?}",
