@@ -185,6 +185,7 @@ impl Builder {
         let ping_config = ping::Config {
             bdp_initial_window: if self.adaptive_window {
                 debug!(initial = SPEC_WINDOW_SIZE, "adaptive window activated");
+                // this must match the one set on the h2 builder
                 Some(SPEC_WINDOW_SIZE)
             } else {
                 None
