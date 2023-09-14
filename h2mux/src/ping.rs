@@ -393,8 +393,8 @@ impl Bdp {
         // bdp, increase to double the current sample.
         if bytes >= self.bdp as usize * 2 / 3 {
             self.bdp = (bytes * 2).min(BDP_LIMIT) as WindowSize;
-            debug!(bytes, rtt = self.rtt, bdp = self.bdp, "BDP calculating");
             // hyper: trace!("BDP increased to {}", self.bdp);
+            debug!(bytes, rtt = self.rtt, bdp = self.bdp, "BDP calculating");
 
             self.stable_count = 0;
             self.ping_delay /= 4; // hyper: 2
@@ -407,11 +407,12 @@ impl Bdp {
 
     fn stabilize_delay(&mut self) {
         if self.ping_delay < Duration::from_secs(2) {
+            // hyper: 10
             self.stable_count += 1;
 
             if self.stable_count >= 4 {
                 // hyper: 2
-                self.ping_delay = Duration::from_secs(2).min(self.ping_delay * 2); // hyper: 4
+                self.ping_delay = Duration::from_secs(2).min(self.ping_delay * 2); // hyper: 4, no limit
                 self.stable_count = 0;
             }
         }

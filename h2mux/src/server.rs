@@ -1,37 +1,43 @@
+//! Server implementation of h2mux.
+
 // Some code are ported from hyper (licensed under MIT):
 // https://github.com/hyperium/hyper/blob/f9f65b7aa67fa3ec0267fe015945973726285bc2/src/proto/h2/server.rs
-use std::error::Error as StdError;
+
 use std::future::poll_fn;
-use std::future::Future;
-use std::future::Pending;
-use std::io::{self, Cursor, IoSlice};
-use std::mem;
-use std::pin::Pin;
-use std::task::{self, ready, Context, Poll};
+use std::task::{ready, Context, Poll};
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 // use h2::client::{ResponseFuture, SendRequest};
-use h2::{Reason, RecvStream, SendStream};
-use http::header::{HeaderName, CONNECTION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE};
-use http::response::Parts;
-use http::Response;
-use http::{request, HeaderMap, Request};
-use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::time::{Duration, Instant};
-use tracing::{debug, trace, warn};
 
-use crate::ping::{self, Ponged};
+use h2::server::SendResponse;
+use h2::RecvStream;
+use http::Response;
+
+use http::request::Parts;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::time::Duration;
+use tracing::{debug, trace};
+
+use crate::ping::{self, Recorder};
 use crate::stream::UpgradedSendStream;
-use crate::stream::{H2Upgraded, SendBuf};
+use crate::stream::{H2Stream, SendBuf};
 use crate::SPEC_WINDOW_SIZE;
 
+/// Server H/2 connection that wraps underlying I/O resource.
 pub struct Connection<IO: AsyncRead + AsyncWrite + Unpin> {
     conn: h2::server::Connection<IO, SendBuf<Bytes>>,
     ping: ping::Recorder,
     ponger: Option<ping::Ponger>,
 }
 
+/// Intermediary struct for accepting a new request (i.e. sub-stream).
+pub struct Accept {
+    recv_stream: RecvStream,
+    respond: SendResponse<SendBuf<Bytes>>,
+    ping: Recorder,
+}
+
+/// Builder of server [`Connection`] with custom configurations.
 #[derive(Clone, Debug)]
 pub struct Builder {
     proto_builder: h2::server::Builder,
@@ -42,14 +48,16 @@ pub struct Builder {
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> Connection<IO> {
-    pub async fn accept(&mut self) -> Option<Result<H2Upgraded<Bytes>, crate::Error>> {
+    /// Accept a new request (i.e. sub-stream), wrapping `poll_accept` inside.
+    pub async fn accept(&mut self) -> Option<Result<(Parts, Accept), crate::Error>> {
         poll_fn(|cx: &mut Context<'_>| self.poll_accept(cx)).await
     }
 
+    /// Poll for a new request (i.e. sub-stream), as well as driving the whole `Connection` for progress.
     pub fn poll_accept(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<H2Upgraded<Bytes>, crate::Error>>> {
+    ) -> Poll<Option<Result<(Parts, Accept), crate::Error>>> {
         if let Some(ponger) = &mut self.ponger {
             match ponger.poll(cx) {
                 Poll::Ready(ping::Ponged::SizeUpdate(wnd)) => {
@@ -65,21 +73,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Connection<IO> {
         }
 
         match ready!(self.conn.poll_accept(cx)) {
-            Some(Ok((request, mut respond))) => {
+            Some(Ok((request, respond))) => {
                 let (head, recv_stream) = request.into_parts();
                 self.ping.record_non_data();
-                let send_stream =
-                    match respond.send_response(Response::builder().body(()).unwrap(), false) {
-                        Ok(send_stream) => send_stream,
-                        Err(e) => return Poll::Ready(Some(Err(e.into()))),
-                    };
-                // TODO: return head
-                Poll::Ready(Some(Ok(H2Upgraded {
-                    ping: self.ping.clone(),
-                    send_stream: unsafe { UpgradedSendStream::new(send_stream) },
-                    recv_stream: recv_stream,
-                    buf: Bytes::new(),
-                })))
+                Poll::Ready(Some(Ok((
+                    head,
+                    Accept {
+                        recv_stream,
+                        respond,
+                        ping: self.ping.clone(),
+                    },
+                ))))
             }
             Some(Err(e)) => Poll::Ready(Some(Err(e.into()))),
             None => {
@@ -89,6 +93,33 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Connection<IO> {
                 Poll::Ready(None)
             }
         }
+    }
+}
+
+impl Accept {
+    /// Actually accept the request and open the sub-stream for reading/writing immediately.
+    ///
+    /// The semantics of the request and response is out of the crate's concern. The caller may
+    /// send whatever resquests/responses.
+    pub fn accept(mut self, response: Response<()>) -> Result<H2Stream, crate::Error> {
+        let send_stream = match self.respond.send_response(response, false) {
+            Ok(send_stream) => send_stream,
+            Err(e) => return Err(e.into()),
+        };
+        Ok(H2Stream {
+            ping: self.ping,
+            send_stream: unsafe { UpgradedSendStream::new(send_stream) },
+            recv_stream: self.recv_stream,
+            buf: Bytes::new(),
+        })
+    }
+
+    /// Reject the request with a custom response.
+    ///
+    /// The response is sent with a end-of-stream mark.
+    pub fn reject(mut self, response: Response<()>) -> Result<(), crate::Error> {
+        self.respond.send_response(response, true)?;
+        Ok(())
     }
 }
 
@@ -106,6 +137,7 @@ impl Default for Builder {
 
 // Some methods are ported from hyper (licensed under MIT).
 impl Builder {
+    /// Create a builder from a h2 builder.
     pub fn new(proto_builder: h2::server::Builder) -> Self {
         Self {
             proto_builder,
@@ -163,6 +195,7 @@ impl Builder {
         self
     }
 
+    /// Perform h2c handshake over an I/O resource (typically a TLS stream).
     pub async fn handshake<IO: AsyncRead + AsyncWrite + Unpin>(
         &self,
         io: IO,
@@ -193,20 +226,16 @@ impl Builder {
     }
 }
 
+/// Perform h2c handshake over an I/O resource (typically a TLS stream).
+///
+/// It is a shortcut for [`Builder::handshake`] with default configs.
+///
+/// # Note
+/// The default config leaves initial connection/stream window size to the default spec value of
+/// 64KiB, which is too small for general network environment. The caller may specify a reasonable
+/// value manually or activate adaptive window with [`Builder`].
 pub async fn handshake<IO: AsyncRead + AsyncWrite + Unpin>(
     io: IO,
 ) -> Result<Connection<IO>, crate::Error> {
-    Builder::default()
-        .adaptive_window(true)
-        .keep_alive_interval(Some(Duration::from_secs(5)))
-        .keep_alive_timeout(Duration::from_secs(20))
-        .keep_alive_while_idle(true)
-        .handshake(io)
-        .await
+    Builder::default().handshake(io).await
 }
-
-// pub trait H2MuxBuilder {
-//     fn handshake_h2mux<T>(&self, io: T) -> HandshakeMux<T> {
-
-//     }
-// }
