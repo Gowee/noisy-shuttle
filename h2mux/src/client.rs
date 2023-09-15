@@ -14,6 +14,11 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Duration;
 use tracing::{debug, warn};
 
+/// Re-export of `h2::client::Builder` for convenience.
+///
+/// # Original Docs
+pub use h2::client::Builder as ProtoBuilder;
+
 use crate::ping::{self, Ponged, Recorder};
 use crate::stream::{poll_shutdown, poll_write, H2Stream, H2Upgraded, SendBuf, UpgradedSendStream};
 use crate::utils::h2_to_io_error;
@@ -82,7 +87,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Future for Connection<IO> {
 
 impl Control {
     /// Open a new sub stream with custom request headers.
-    /// 
+    ///
     /// The content of request uri, method and headers has nothing to with the functionality of
     /// h2mux. The caller may store any information or leave it to be [`Default::default`].
     pub async fn open_stream(
@@ -116,7 +121,7 @@ impl Default for Builder {
 // Some methods are ported from hyper (licensed under MIT).
 impl Builder {
     /// Create a builder from a h2 builder.
-    pub fn new(proto_builder: h2::client::Builder) -> Self {
+    pub fn new(proto_builder: ProtoBuilder) -> Self {
         Self {
             proto_builder,
             ..Default::default()

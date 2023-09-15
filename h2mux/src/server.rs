@@ -7,16 +7,18 @@ use std::future::poll_fn;
 use std::task::{ready, Context, Poll};
 
 use bytes::Bytes;
-// use h2::client::{ResponseFuture, SendRequest};
-
 use h2::server::SendResponse;
 use h2::RecvStream;
-use http::Response;
-
 use http::request::Parts;
+use http::Response;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Duration;
 use tracing::{debug, trace};
+
+/// Re-export of `h2::server::Builder` for convenience.
+///
+/// # Original Docs
+pub use h2::server::Builder as ProtoBuilder;
 
 use crate::ping::{self, Recorder};
 use crate::stream::UpgradedSendStream;
@@ -138,7 +140,7 @@ impl Default for Builder {
 // Some methods are ported from hyper (licensed under MIT).
 impl Builder {
     /// Create a builder from a h2 builder.
-    pub fn new(proto_builder: h2::server::Builder) -> Self {
+    pub fn new(proto_builder: ProtoBuilder) -> Self {
         Self {
             proto_builder,
             ..Default::default()

@@ -1,6 +1,6 @@
 [package]
 name = "tokio-h2mux"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Stream multiplexing via HTTP/2 (like yamux)"
 homepage = "https://github.com/Gowee/noisy-shuttle/tree/main/h2mux"
