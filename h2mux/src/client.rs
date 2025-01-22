@@ -34,6 +34,7 @@ pub struct Connection<IO: AsyncRead + AsyncWrite + Unpin> {
 }
 
 /// Controller of [`Connection`].
+#[derive(Clone)]
 pub struct Control {
     send_request: SendRequest<SendBuf<Bytes>>,
     ping: Recorder,

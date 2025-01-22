@@ -561,9 +561,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 
 [[package]]
 name = "h2"
-version = "0.3.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97ec8491ebaf99c8eaa73058b045fe58073cd6be7f596ac993ced0b0a0c01049"
+version = "0.3.21"
 dependencies = [
  "bytes",
  "fnv",
@@ -575,18 +573,6 @@ dependencies = [
  "slab",
  "tokio",
  "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "h2mux"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "h2",
- "http",
- "thiserror",
- "tokio",
  "tracing",
 ]
 
@@ -803,7 +789,6 @@ dependencies = [
  "clap 3.2.25",
  "deadqueue",
  "futures",
- "h2mux",
  "httparse",
  "ja3-rustls",
  "lru",
@@ -815,6 +800,7 @@ dependencies = [
  "structopt",
  "structopt-flags",
  "tokio",
+ "tokio-h2mux",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1523,6 +1509,18 @@ dependencies = [
  "socket2",
  "tokio-macros",
  "windows-sys",
+]
+
+[[package]]
+name = "tokio-h2mux"
+version = "0.0.3"
+dependencies = [
+ "bytes",
+ "h2",
+ "http",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

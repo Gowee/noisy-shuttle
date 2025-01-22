@@ -26,4 +26,4 @@ structopt-flags = "0.3.6"
 bytes = "*"
 
 snowy-tunnel = { path = "../tunnel" }
-h2mux = { path = "../h2mux" }
+h2mux = { package = "tokio-h2mux", path = "../h2mux" }

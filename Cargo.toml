@@ -2,9 +2,15 @@
 
 members = [
     "tunnel",
-    "shuttle"
+    "shuttle",
+    "h2mux"
 ]
+
+resolver = "2"
 
 [patch.crates-io]
 rustls = { path = "./rustls-patched/rustls" }
+h2 = { path = "../h2/" }
 
+[profile.release]
+debug-assertions = true

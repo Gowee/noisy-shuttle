@@ -54,5 +54,6 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
     // };
     let connector = H2MuxConnector::new(client, opt.remote_addr);
     serve_plain(opt.listen_addr, connector).await?;
+    dbg!("exiting");
     Ok(())
 }

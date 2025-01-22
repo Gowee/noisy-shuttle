@@ -60,10 +60,11 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
     match server.accept(inbound).await {
         Ok(mut snowys) => {
             let mut h2conn = h2mux::server::handshake(snowys).await?;
-            while let Some(stream) = h2conn.accept().await {
-                match stream {
-                    Ok(mut snowys) => {
+            while let Some(accept) = h2conn.accept().await {
+                match accept {
+                    Ok((_head, accept)) => {
                         tokio::spawn(async move {
+                            let mut snowys = accept.accept(Default::default())?;
                             use crate::trojan::Cmd::*;
                             let req = read_trojan_like_request(&mut snowys)
                                 .await
@@ -183,7 +184,7 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
 /// Relay traffic between the incoming stream and the outbound UdpSocket
 #[instrument(name = "udp_relay", skip(inbound, outbound), fields(local_out_udp=%outbound.local_addr().unwrap()))]
 async fn relay_udp(
-    inbound: &mut h2mux::H2Upgraded<bytes::Bytes>,
+    inbound: &mut h2mux::H2Stream,
     outbound: &mut UdpSocket,
 ) -> io::Result<(usize, usize)> {
     // SnowyStream buffers read internally but not write.

@@ -3,7 +3,7 @@ use deadqueue::resizable::Queue;
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn, Instrument};
 
 use std::cmp;
 use std::collections::VecDeque;
@@ -23,7 +23,7 @@ pub const PREFLIHGTER_EMA_COEFF: f32 = 1.0 / 3.0;
 /// Generic connector that establish a connection to peer server
 #[async_trait]
 pub trait Connector {
-    async fn connect(&self) -> io::Result<h2mux::client::PendingStream>;
+    async fn connect(&self) -> io::Result<h2mux::client::InFlightH2Stream>;
 }
 
 /// Connector that establish connections in advance based on some simple heuristic predications
@@ -216,6 +216,7 @@ pub trait Connector {
 
 pub struct H2MuxConnector {
     client: Client,
+    mux_builder: h2mux::client::Builder,
     remote_addr: String,
     control: Arc<tokio::sync::Mutex<Option<h2mux::client::Control>>>,
 }
@@ -223,8 +224,15 @@ pub struct H2MuxConnector {
 impl H2MuxConnector {
     pub fn new(client: Client, remote_addr: String) -> Self {
         // assert!(min > 0 && min <= max.unwrap_or(usize::MAX));
+        let mut proto_builder = h2mux::client::ProtoBuilder::new();
+        proto_builder
+            .initial_connection_window_size(15 * 1024 * 1024)
+            .initial_window_size(6 * 1024 * 1024);
+        let mux_builder = h2mux::client::Builder::new(proto_builder);
+
         Self {
             client,
+            mux_builder,
             remote_addr,
             control: Default::default(),
         }
@@ -233,22 +241,28 @@ impl H2MuxConnector {
 
 #[async_trait]
 impl Connector for H2MuxConnector {
-    async fn connect(&self) -> io::Result<h2mux::client::PendingStream> {
-        debug!("start to connect");
+    #[instrument(parent = None, name = "connection", skip(self), fields(local = tracing::field::Empty, remote = tracing::field::Empty))]
+    async fn connect(&self) -> io::Result<h2mux::client::InFlightH2Stream> {
         let mut locked = self.control.lock().await;
         let control: &mut h2mux::client::Control = match locked.as_mut() {
             Some(c) => c,
             None => {
-                debug!("connect to remote");
+                debug!("tcp connect");
                 let s = TcpStream::connect(self.remote_addr.as_str()).await?;
+                tracing::Span::current()
+                    .record("local", tracing::field::debug(s.local_addr().unwrap()))
+                    .record("remote", tracing::field::debug(s.peer_addr().unwrap()));
                 debug!("noise handshake");
                 let s = self.client.connect(s).await?;
-                debug!("initiate new h2 conn");
-                let (control, conn) = h2mux::client::handshake(s)
+                debug!("h2 handshake");
+                let (control, conn) = self
+                    .mux_builder
+                    .handshake(s)
                     .await
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                debug!("h2 conn ready");
+
                 tokio::spawn(async move {
+                    debug!("connection ready");
                     let r = conn.await;
                     debug!("h2 connection terminated {:?}", r);
                 });
@@ -265,10 +279,5 @@ impl Connector for H2MuxConnector {
                 Err(io::Error::new(io::ErrorKind::Other, e))
             }
         }
-
-        // let t = Instant::now();
-        // debug!("handshaked within {}", t.elapsed().autofmt());
-
-        // Ok(s)
     }
 }

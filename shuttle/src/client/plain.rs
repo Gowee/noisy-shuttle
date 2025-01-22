@@ -1,12 +1,12 @@
 use anyhow::{anyhow, ensure, Context, Result};
 
-use h2mux::client::PendingStream;
+use h2mux::client::InFlightH2Stream;
 use socks5::sync::FromIO;
 use socks5_protocol as socks5;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::{timeout, Instant};
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{debug, info, info_span, instrument, trace, warn, Instrument, Span};
 
 use std::io::{self, Cursor, Write};
 use std::net::SocketAddr;
@@ -64,6 +64,8 @@ async fn handle_connection(
 
 #[instrument(name = "socks5_proxy", skip(inbound, client_addr, connector), fields(
     %client = client_addr,
+    command = tracing::field::Empty,
+    dest = tracing::field::Empty,
     // %local_in = inbound.local_addr().unwrap(),
 ))]
 #[inline(always)]
@@ -83,67 +85,73 @@ async fn handle_connection_socks5(
         .await?;
     // CommandRequest includes VER
     let req = socks5::CommandRequest::read(&mut inbound).await?;
-    info!(
-        command = ?req.command,
-        dest_addr = req.address.to_string(),
-        "accepting request"
-    );
-    match req.command {
-        socks5::Command::Connect => {
-            inbound
-                .write_all(SOCKS5_CONNECT_SUCCEEDED)
-                .await
-                .context("failed to write socks5 response")?;
-            // TODO: return error from connect?
-            let mut snowys = connector
-                .connect()
-                .await
-                .context("failed to establish snowy tunnel")?;
-            let outbuf = Some(TrojanLikeRequest::new(Cmd::Connect, req.address).encoded());
-            log_relay!(relay_tcp_with(&mut inbound, &mut snowys, outbuf));
-            Ok(())
-        }
-        socks5::Command::UdpAssociate => {
-            // By binding a random port to receive inbound UDP packets, shuttle client cannot be
-            // behind NAT.
-            // By not connecting (ignoring address in request), the inbound can be behind NAT.
-            //
-            // The alternative way to implement UDPAssociate is to receive inbound UDP packets on
-            // a fixed port say 0.0.0.0:1080 and maintain a queue to store NAT-like association.
-            let mut bnd_addr = inbound.local_addr()?;
-            bnd_addr.set_port(0);
-            let mut inbound_udp = UdpSocket::bind(bnd_addr).await?;
-            bnd_addr = inbound_udp.local_addr()?;
-            trace!(local_in_udp = bnd_addr.to_string(), "UDP bound");
-            let mut buffered_inbound = BufWriter::new(&mut inbound);
-            socks5::CommandResponse::success(bnd_addr.into())
-                .write(&mut buffered_inbound)
-                .await
-                .map_err(|e| e.to_io_err())?;
-            buffered_inbound.flush().await?;
 
-            let mut snowys = connector
-                .connect()
-                .await
-                .context("failed to establish snowy tunnel")?;
-            let header = TrojanLikeRequest::new(Cmd::UdpAssociate, Default::default());
-            log_relay!(relay_udp_with(
-                &mut inbound,
-                &mut inbound_udp,
-                &mut snowys,
-                header
-            ));
-            Ok(())
-        }
-        // not supported
-        socks5::Command::Bind => {
-            inbound.write_all(SOCKS5_COMMAND_NOT_SUPPORTED).await?;
-            Err(anyhow!("Socks5 BIND not supported"))
+    let span = Span::current();
+    span.record("command", tracing::field::debug(&req.command));
+    span.record("dest", tracing::field::display(&req.address));
+
+    async move {
+        info!("accept request");
+
+        match req.command {
+            socks5::Command::Connect => {
+                inbound
+                    .write_all(SOCKS5_CONNECT_SUCCEEDED)
+                    .await
+                    .context("failed to write socks5 response")?;
+                // TODO: return error from connect?
+                let mut snowys = connector
+                    .connect()
+                    .await
+                    .context("failed to establish snowy tunnel")?;
+                let outbuf = Some(TrojanLikeRequest::new(Cmd::Connect, req.address).encoded());
+                log_relay!(relay_tcp_with(&mut inbound, &mut snowys, outbuf));
+                Ok(())
+            }
+            socks5::Command::UdpAssociate => {
+                // By binding a random port to receive inbound UDP packets, shuttle client cannot be
+                // behind NAT.
+                // By not connecting (ignoring address in request), the inbound can be behind NAT.
+                //
+                // The alternative way to implement UDPAssociate is to receive inbound UDP packets on
+                // a fixed port say 0.0.0.0:1080 and maintain a queue to store NAT-like association.
+                let mut bnd_addr = inbound.local_addr()?;
+                bnd_addr.set_port(0);
+                let mut inbound_udp = UdpSocket::bind(bnd_addr).await?;
+                bnd_addr = inbound_udp.local_addr()?;
+                trace!(local_in_udp = bnd_addr.to_string(), "UDP bound");
+                let mut buffered_inbound = BufWriter::new(&mut inbound);
+                socks5::CommandResponse::success(bnd_addr.into())
+                    .write(&mut buffered_inbound)
+                    .await
+                    .map_err(|e| e.to_io_err())?;
+                buffered_inbound.flush().await?;
+
+                let mut snowys = connector
+                    .connect()
+                    .await
+                    .context("failed to establish snowy tunnel")?;
+                let header = TrojanLikeRequest::new(Cmd::UdpAssociate, Default::default());
+                log_relay!(relay_udp_with(
+                    &mut inbound,
+                    &mut inbound_udp,
+                    &mut snowys,
+                    header
+                ));
+                Ok(())
+            }
+            // not supported
+            socks5::Command::Bind => {
+                inbound.write_all(SOCKS5_COMMAND_NOT_SUPPORTED).await?;
+                Err(anyhow!("Socks5 BIND not supported"))
+            }
         }
     }
+    .instrument(span)
+    .await
 }
 
-#[instrument(name = "http_proxy", skip(inbound, client_addr, connector), fields(
+#[instrument(name = "http", skip(inbound, client_addr, connector), fields(
     %client = client_addr,
     // %local_in = inbound.local_addr().unwrap(),
 ))]
@@ -301,7 +309,7 @@ async fn handle_connection_http(
 ))]
 async fn relay_tcp_with(
     mut inbound: &mut TcpStream,
-    mut outbound: &mut PendingStream,
+    mut outbound: &mut InFlightH2Stream,
     outbuf: Option<Vec<u8>>,
 ) -> Result<(u64, u64)> {
     debug!(outbuf_len = outbuf.as_ref().map(|b| b.len()), "starting");
@@ -346,7 +354,7 @@ async fn relay_tcp_with(
 async fn relay_udp_with(
     inbound_tcp: &mut TcpStream,
     inbound: &mut UdpSocket,
-    outbound: &mut PendingStream,
+    outbound: &mut InFlightH2Stream,
     header: TrojanLikeRequest,
 ) -> Result<(u64, u64)> {
     debug!("starting");
