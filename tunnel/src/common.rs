@@ -31,6 +31,7 @@ pub const PSKLEN: usize = 32; // snow::constants::PSKLEN;
 pub const DEFAULT_ALPN_PROTOCOLS: [&[u8]; 2] = [b"http/2".as_slice(), b"http/1.1".as_slice()];
 
 const CONTEXT: &[u8] = b"the secure tunnel under snow";
+const REUSE_MARK: &[u8] = b"\x00\x00\x00REUSEESUER\x00\x00\x00";
 
 /// Secure tunnel on the top of TcpStream encrypted by Noise
 // #[derive(Debug)]
@@ -47,6 +48,8 @@ pub struct SnowyStream {
     pub(crate) read_offset: usize,
     pub(crate) write_buffer: Vec<u8>,
     pub(crate) write_offset: usize,
+    pub(crate) signalled_reuse: bool,
+    pub(crate) peer_signalled_reuse: bool,
 }
 
 impl SnowyStream {
@@ -70,6 +73,8 @@ impl SnowyStream {
             read_offset: 0,
             write_buffer: Default::default(),
             write_offset: 0,
+            signalled_reuse: false,
+            peer_signalled_reuse: false,
         }
     }
 
@@ -79,6 +84,55 @@ impl SnowyStream {
 
     pub fn as_inner_mut(&mut self) -> &mut TcpStream {
         &mut self.socket
+    }
+
+    pub fn poll_signal_reuse(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.signalled_reuse {
+            return Poll::Ready(Ok(()));
+        }
+        match Pin::new(&mut self.socket).poll_write(cx, REUSE_MARK) {
+            Poll::Ready(Ok(n)) => {
+                if n == 0 {
+                    Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "failed to signal reuse",
+                    )))
+                } else {
+                    // The internal buf should fit the whole REUSE_MARK.
+                    assert_eq!(n, REUSE_MARK.len(), "REUSE_MARK partially written");
+                    self.signalled_reuse = true;
+                    Poll::Ready(Ok(()))
+                }
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    pub fn poll_ensure_usable(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // FIXME: pin usage
+        if !self.state.readable() || !self.state.writeable() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Socket already shutdown",
+            )));
+        }
+        // first, signal reuse if not yet
+        ready!(self.poll_signal_reuse(cx)?);
+
+        // then, read until EoF (peer signals reuse)
+        // TODO: sink buf?
+        let mut _buf = [0u8; 256 * 1024];
+        let mut pinned_self = Pin::new(self);
+        loop {
+            let mut buf = ReadBuf::new(&mut _buf);
+            ready!(pinned_self.as_mut().poll_read(cx, &mut buf)?);
+            if buf.filled().is_empty() {
+                pinned_self.get_mut().signalled_reuse = false; // clear state
+                // reuse ready
+                return Poll::Ready(Ok(()));
+            }
+        }
     }
 }
 
@@ -106,7 +160,7 @@ impl AsyncRead for SnowyStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if !self.state.readable() {
+        if !self.state.readable() || self.peer_signalled_reuse {
             return Poll::Ready(Ok(()));
         }
         // Ref: https://github.com/tokio-rs/tls/blob/bcf4f8e3f96983dbb7a61808b0f1fcd04fb678ae/tokio-rustls/src/common/mod.rs#L91
@@ -173,6 +227,11 @@ impl AsyncRead for SnowyStream {
                             message.typ,
                             message.version,
                         );
+                        if this.read_buffer.starts_with(REUSE_MARK) {
+                            this.peer_signalled_reuse = true;
+                            this.read_offset = REUSE_MARK.len();
+                            break 'read_more;
+                        }
                     }
                     Err(MessageError::TooShortForHeader) | Err(MessageError::TooShortForLength) => {
                         // no ready tls frame, proceed to read the inner socket
@@ -374,6 +433,7 @@ impl AsyncWrite for SnowyStream {
                         }
                     }
                     Poll::Ready(Err(e)) => {
+                        // TODO: shutdown write?
                         debug!("write socket error, stream: {:?}, state: {:?}, error: {:?}, buffered: {}/{}", this.socket, this.state, e, this.write_offset, this.write_buffer.len());
                         return Poll::Ready(Err(e));
                     }
@@ -444,19 +504,27 @@ impl AsyncWrite for SnowyStream {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.state.writeable() {
-            self.state.shutdown_write();
-            // proceed even if state has already been unwritable
-            // otherwise latter steps would be ignored in second poll calls
-        }
-        // TODO: https://www.openssl.org/docs/man1.0.2/man3/SSL_shutdown.html
-        // https://github.com/tokio-rs/tls/blob/56855b71661a9bf848c1a3c3f03ead6ac3f1b49f/tokio-rustls/src/client.rs#L235
-        // self.send_warning_alert_no_log(AlertDescription::CloseNotify);
-        // let alert = Message::build_alert(AlertLevel::Warning, rustls::AlertDescription::CloseNotify);
+        // REUSE:
+        // if self.virtual_state.writeable() {
+        //     self.virtual_state.shutdown_write();
+        // }
+        ready!(self.as_mut().poll_signal_reuse(cx))?;
+        self.as_mut().poll_flush(cx)
 
-        // per trait's doc, flush should be polled till ready before shutdown returns ready
-        ready!(self.as_mut().poll_flush(cx))?;
-        Pin::new(&mut self.socket).poll_shutdown(cx)
+        // if self.state.writeable() {
+        //     self.state.shutdown_write();
+        //     // proceed even if state has already been unwritable
+        //     // otherwise latter steps would be ignored in second poll calls
+        // }
+
+        // // TODO: https://www.openssl.org/docs/man1.0.2/man3/SSL_shutdown.html
+        // // https://github.com/tokio-rs/tls/blob/56855b71661a9bf848c1a3c3f03ead6ac3f1b49f/tokio-rustls/src/client.rs#L235
+        // // self.send_warning_alert_no_log(AlertDescription::CloseNotify);
+        // // let alert = Message::build_alert(AlertLevel::Warning, rustls::AlertDescription::CloseNotify);
+
+        // // per trait's doc, flush should be polled till ready before shutdown returns ready
+        // ready!(self.as_mut().poll_flush(cx))?;
+        // Pin::new(&mut self.socket).poll_shutdown(cx)
     }
 }
 

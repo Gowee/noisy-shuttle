@@ -2,7 +2,8 @@
 
 members = [
     "tunnel",
-    "shuttle"
+    "shuttle",
+    "copybidi"
 ]
 
 [patch.crates-io]
