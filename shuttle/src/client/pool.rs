@@ -37,15 +37,20 @@ pub trait Connector {
 /// If the accumulated delay exceeds an average handshake time, the queue size is increased by one.
 /// If a connection is unused after `PREFLIHGTER_CONNIDLE`, the queue size is decreased by one.
 #[derive(Debug)]
-pub struct Preflighter {
-    queue: Arc<Queue<(JoinHandle<io::Result<SnowyStream>>, Instant)>>,
+pub struct Pool {
+    queue: Arc<Queue<EitherStream>>,
     average_handshake_time: Arc<Mutex<f32>>,
     cumulative_handshake_delay: Mutex<f32>,
     min: usize,
     max: Option<usize>,
 }
 
-impl Preflighter {
+pub enum EitherStream {
+    NewStream(JoinHandle<io::Result<SnowyStream>>, Instant),
+    ReusedStream(SnowyStream),
+}
+
+impl Pool {
     /// Create a preflighter and start it immediately by internally spawning a task.
     pub fn new_flighting(
         client: Client,
@@ -56,7 +61,7 @@ impl Preflighter {
         assert!(min > 0 && min <= max.unwrap_or(usize::MAX));
         let queue = Arc::new(Queue::new(min));
         let average_handshake_time = Arc::new(Mutex::new(0.0));
-        tokio::spawn(Self::run(
+        tokio::spawn(Self::flight(
             client,
             remote_addr,
             queue.clone(),
@@ -71,10 +76,10 @@ impl Preflighter {
         }
     }
 
-    async fn run(
+    async fn flight(
         client: Client,
         remote_addr: String,
-        queue: Arc<Queue<(JoinHandle<io::Result<SnowyStream>>, Instant)>>,
+        queue: Arc<Queue<EitherStream>>,
         aht: Arc<Mutex<f32>>,
     ) -> io::Result<()> {
         let client = Arc::new(client);
@@ -100,7 +105,7 @@ impl Preflighter {
                 }
                 r
             });
-            queue.push((conn, now)).await;
+            queue.push(EitherStream::NewStream(conn, now)).await;
             window.push_back(Instant::now());
             count += 1;
             while window.front().is_some() && window.front().unwrap().elapsed().as_secs() > 60 {
@@ -108,14 +113,23 @@ impl Preflighter {
                 count -= 1;
             }
             debug!(last_min = count, pending = queue.len(), "preflighting");
+            break;
         }
+        warn!("test done flighting");
+        Ok(())
     }
 
     /// Get a (hopefully) established connection
     pub async fn get(&self) -> io::Result<(SnowyStream, Instant)> {
         let mut errcnt = 0;
+        // FIXME: why loop here?
         loop {
-            let (h, t1) = self.queue.pop().await;
+            let (h, t1) = match self.queue.pop().await {
+                EitherStream::NewStream(h, t) => (h, t),
+                EitherStream::ReusedStream(s) => return Ok((s, Instant::now())),
+            };
+            // TODO: update calculation to take reusedstream into account
+            // let (h, t1) = self.queue.pop().await;
             if t1.elapsed().as_secs() as usize > PREFLIHGTER_CONNIDLE {
                 debug_assert!(self.queue.capacity() > 0);
                 self.queue
@@ -171,10 +185,14 @@ impl Preflighter {
             }
         }
     }
+
+    pub async fn give(&self, s: SnowyStream) {
+        self.queue.push(EitherStream::ReusedStream(s)).await
+    }
 }
 
 #[async_trait]
-impl Connector for Preflighter {
+impl Connector for Pool {
     async fn connect(&self) -> io::Result<SnowyStream> {
         let (s, t) = self.get().await?;
         debug!(

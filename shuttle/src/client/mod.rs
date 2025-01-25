@@ -6,11 +6,12 @@ use std::time::Duration;
 
 use crate::opt::CltOpt;
 
-mod connector;
+// mod connector;
 mod plain;
 // mod redir; // UNIMPLEMENTED
+mod pool;
 
-use self::connector::{AdHocConnector, Preflighter, PREFLIHGTER_CONNIDLE, PREFLIHGTER_EMA_COEFF};
+use self::pool::{Pool, PREFLIHGTER_CONNIDLE, PREFLIHGTER_EMA_COEFF};
 use self::plain::serve as serve_plain;
 
 /// Maximum size of the initial data from inbound TCP socket which would be sent together with
@@ -41,11 +42,12 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
 
     match opt.preflight {
         (0, Some(0)) => {
-            let connector = AdHocConnector::new(client, opt.remote_addr);
-            serve_plain(opt.listen_addr, connector).await?;
+            unimplemented!();
+            // let connector = AdHocConnector::new(client, opt.remote_addr);
+            // serve_plain(opt.listen_addr, connector).await?;
         }
         (min, max) => {
-            let preflighter = Preflighter::new_flighting(client, opt.remote_addr, min, max);
+            let preflighter = Pool::new_flighting(client, opt.remote_addr, min, max);
             serve_plain(opt.listen_addr, preflighter).await?;
         }
     };

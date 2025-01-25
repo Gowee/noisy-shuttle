@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 
+use futures::future::poll_fn;
 use lru::LruCache;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::{lookup_host, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
@@ -59,42 +60,54 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
     use snowy_tunnel::AcceptError::*;
     match server.accept(inbound).await {
         Ok(mut snowys) => {
-            use crate::trojan::Cmd::*;
-            let req = read_trojan_like_request(&mut snowys)
-                .await
-                .context("failed to read request header")?;
-            info!(command=?req.cmd, dest_addr=%req.dest_addr, "accepting request");
+            loop {
+                use crate::trojan::Cmd::*;
+                let req = read_trojan_like_request(&mut snowys)
+                    .await
+                    .context("failed to read request header")?;
+                info!(command=?req.cmd, dest_addr=%req.dest_addr, "accepting request");
 
-            match req.cmd {
-                Connect => {
-                    let mut outbound = call_with_addr!(TcpStream::connect, req.dest_addr)
-                        .context("failed to connect to remote")?;
-                    debug!(
-                        local_out = outbound.local_addr().unwrap().to_string(),
-                        remote = outbound.peer_addr().unwrap().to_string(),
-                        "starting tcp relay"
-                    );
-                    match tokio::io::copy_bidirectional(&mut snowys, &mut outbound).await {
-                        Ok((tx, rx)) => info!(tx, rx, "relay closed"),
-                        Err(error) => warn!(?error, "relay terminated"),
+                match req.cmd {
+                    Connect => {
+                        let mut outbound = call_with_addr!(TcpStream::connect, req.dest_addr)
+                            .context("failed to connect to remote")?;
+                        debug!(
+                            local_out = outbound.local_addr().unwrap().to_string(),
+                            remote = outbound.peer_addr().unwrap().to_string(),
+                            "starting tcp relay"
+                        );
+                        match tokio::io::copy_bidirectional(&mut snowys, &mut outbound).await {
+                            Ok((tx, rx)) => info!(tx, rx, "relay closed"),
+                            Err(error) => warn!(?error, "relay terminated"),
+                        }
                     }
-                    Ok(())
+                    UdpAssociate => {
+                        // do not connect, allowing UDP punching
+                        let mut outbound = UdpSocket::bind("0.0.0.0:0").await?;
+                        debug!(
+                            local_out = outbound.local_addr().unwrap().to_string(),
+                            remote = req.dest_addr.to_string(),
+                            "starting udp relay"
+                        );
+                        match relay_udp(&mut snowys, &mut outbound).await {
+                            Ok((tx, rx)) => info!(tx, rx, "relay udp closed"),
+                            Err(error) => warn!(?error, "relay udp terminated"),
+                        }
+                    } // Bind => return Err(io::Error::new(io::ErrorKind::Other, "Bind command not supported"))
                 }
-                UdpAssociate => {
-                    // do not connect, allowing UDP punching
-                    let mut outbound = UdpSocket::bind("0.0.0.0:0").await?;
-                    debug!(
-                        local_out = outbound.local_addr().unwrap().to_string(),
-                        remote = req.dest_addr.to_string(),
-                        "starting udp relay"
-                    );
-                    match relay_udp(&mut snowys, &mut outbound).await {
-                        Ok((tx, rx)) => info!(tx, rx, "relay udp closed"),
-                        Err(error) => warn!(?error, "relay udp terminated"),
-                    }
-                    Ok(())
-                } // Bind => return Err(io::Error::new(io::ErrorKind::Other, "Bind command not supported"))
+                info!("try reusing");
+                // TODO: just draft now
+                match poll_fn(|cx| snowys.poll_ensure_usable(cx)).await {
+                    Ok(()) => {
+                        info!("reusing conn");
+                    },
+                    Err(e) => {
+                        info!("cannot reuse conn: {:?}", e);
+                        break;
+                    },
+                }
             }
+            Ok(())
         }
         Err(IoError(e)) => Err(e).context("failed to accept connection"),
         Err(e) => {

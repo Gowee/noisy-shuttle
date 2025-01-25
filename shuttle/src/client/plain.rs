@@ -7,6 +7,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::{timeout, Instant};
 use tracing::{debug, info, instrument, trace, warn};
 
+use std::future::poll_fn;
 use std::io::{self, Cursor, Write};
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -20,12 +21,12 @@ use crate::trojan::{
 };
 use crate::utils::{extract_host_addr_from_url, url_to_relative, vec_uninit, DurationExt};
 
-use super::connector::Connector;
+use super::pool::{Pool, Connector};
 use super::{FIRST_PACKET_TIMEOUT, MAX_FIRST_PACKET_SIZE};
 
 pub async fn serve(
     listen_addr: SocketAddr,
-    connector: impl Connector + 'static + Send + Sync,
+    connector: Pool,
 ) -> Result<()> {
     let connector = Arc::new(connector);
     let listener = TcpListener::bind(listen_addr)
@@ -50,7 +51,7 @@ pub async fn serve(
 async fn handle_connection(
     inbound: TcpStream,
     client_addr: SocketAddr,
-    connector: Arc<impl Connector + 'static>,
+    connector: Arc<Pool>,
 ) -> Result<()> {
     let mut first = [0u8];
     inbound.peek(&mut first).await?;
@@ -69,7 +70,7 @@ async fn handle_connection(
 async fn handle_connection_socks5(
     mut inbound: TcpStream,
     client_addr: SocketAddr,
-    connector: Arc<impl Connector + 'static>,
+    connector: Arc<Pool>,
 ) -> Result<()> {
     const SOCKS5_CONNECT_SUCCEEDED: &[u8] =
         &[0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
@@ -100,6 +101,18 @@ async fn handle_connection_socks5(
                 .context("failed to establish snowy tunnel")?;
             let outbuf = Some(TrojanLikeRequest::new(Cmd::Connect, req.address).encoded());
             log_relay!(relay_tcp_with(&mut inbound, &mut snowys, outbuf));
+            info!("tip");
+            match poll_fn(|cx| snowys.poll_ensure_usable(cx)).await {
+                Ok(()) => {
+                    info!("boooom");
+                    connector.give(snowys).await;
+                    info!("give back conn");
+                },
+                // TODO: do something here
+                Err(e) => {
+                    info!("cannot reuse conn: {:?}", e);
+                }
+            }
             Ok(())
         }
         socks5::Command::UdpAssociate => {
@@ -132,6 +145,16 @@ async fn handle_connection_socks5(
                 &mut snowys,
                 header
             ));
+            match poll_fn(|cx| snowys.poll_ensure_usable(cx)).await {
+                Ok(()) => {
+                    connector.give(snowys).await;
+                    info!("give back u conn ");
+                },
+                // TODO: do something here
+                Err(e) => {
+                    info!("cannot reuse u conn: {:?}", e);
+                }
+            }
             Ok(())
         }
         // not supported
@@ -150,7 +173,7 @@ async fn handle_connection_socks5(
 async fn handle_connection_http(
     mut inbound: TcpStream,
     client_addr: SocketAddr,
-    connector: Arc<impl Connector + 'static>,
+    connector: Arc<Pool>,
 ) -> Result<()> {
     const HTTP_200_CONNECTION_ESTABLISHED: &[u8] =
         b"HTTP/1.1 200 Connection Established\r\nX-Powered-By: noisy-shuttle\r\n\r\n";

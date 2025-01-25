@@ -5,7 +5,7 @@ use snow::params::NoiseParams;
 use snow::TransportState;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 use futures::ready;
 use std::cmp;
@@ -90,7 +90,8 @@ impl SnowyStream {
         if self.signalled_reuse {
             return Poll::Ready(Ok(()));
         }
-        match Pin::new(&mut self.socket).poll_write(cx, REUSE_MARK) {
+        let mut pinned_self = Pin::new(self);
+        match pinned_self.as_mut().poll_write(cx, REUSE_MARK) {
             Poll::Ready(Ok(n)) => {
                 if n == 0 {
                     Poll::Ready(Err(io::Error::new(
@@ -100,7 +101,7 @@ impl SnowyStream {
                 } else {
                     // The internal buf should fit the whole REUSE_MARK.
                     assert_eq!(n, REUSE_MARK.len(), "REUSE_MARK partially written");
-                    self.signalled_reuse = true;
+                    pinned_self.get_mut().signalled_reuse = true;
                     Poll::Ready(Ok(()))
                 }
             }
@@ -128,7 +129,9 @@ impl SnowyStream {
             let mut buf = ReadBuf::new(&mut _buf);
             ready!(pinned_self.as_mut().poll_read(cx, &mut buf)?);
             if buf.filled().is_empty() {
-                pinned_self.get_mut().signalled_reuse = false; // clear state
+                let this = pinned_self.get_mut();
+                this.signalled_reuse = false; // clear state
+                this.peer_signalled_reuse = false;
                 // reuse ready
                 return Poll::Ready(Ok(()));
             }
@@ -229,7 +232,14 @@ impl AsyncRead for SnowyStream {
                         );
                         if this.read_buffer.starts_with(REUSE_MARK) {
                             this.peer_signalled_reuse = true;
-                            this.read_offset = REUSE_MARK.len();
+                            info!("peer_signalled_reuse packetlen={:?}", this.read_buffer.len());
+                            if this.read_buffer.len() == REUSE_MARK.len() {
+                                this.read_offset = 0;
+                                this.read_buffer.clear();
+                            }
+                            else {
+                                this.read_offset = REUSE_MARK.len();
+                            }
                             break 'read_more;
                         }
                     }
@@ -383,7 +393,7 @@ impl AsyncWrite for SnowyStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if !self.state.writeable() {
+        if !self.state.writeable() || self.signalled_reuse {
             return Poll::Ready(Ok(0));
         }
         // WARN:
