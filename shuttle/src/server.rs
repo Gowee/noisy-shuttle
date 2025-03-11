@@ -1,9 +1,10 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 
 use futures::future::poll_fn;
 use lru::LruCache;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::{lookup_host, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use copy_bidirectional_with_context::copy_bidirectional;
 use tracing::{debug, info, instrument, trace, warn};
 
 use std::fmt::Debug;
@@ -76,7 +77,7 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
                             remote = outbound.peer_addr().unwrap().to_string(),
                             "starting tcp relay"
                         );
-                        match tokio::io::copy_bidirectional(&mut snowys, &mut outbound).await {
+                        match copy_bidirectional(&mut snowys, &mut outbound).await {
                             Ok((tx, rx)) => info!(tx, rx, "relay closed"),
                             Err(error) => warn!(?error, "relay terminated"),
                         }
@@ -125,7 +126,7 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
                         // an invalid ServerHello might be the result of a strange ClientHello fabricated by
                         // a malicious client, so just copy_bidi as usual in this case
                         inbound.write_all(&buf).await?;
-                        tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await
+                        copy_bidirectional(&mut inbound, &mut outbound).await.map_err(Into::<io::Error>::into).map_err(Into::<anyhow::Error>::into)
                     }
                     ReplayDetected {
                         buf,
@@ -140,24 +141,25 @@ pub async fn handle_connection<A: ToSocketAddrs + Debug>(
                         info!("fallback relay (pooh's agent)");
                         let mut b = TcpStream::connect(&opt.camouflage_addr).await?;
                         b.write_all(&buf).await?;
-                        tokio::io::copy_bidirectional(&mut io, &mut b).await
+                        copy_bidirectional(&mut io, &mut b).await.map_err(Into::<io::Error>::into).map_err(Into::<anyhow::Error>::into)
                     }
                     Unauthenticated { buf, mut io } => {
                         info!("fallback relay (unauthenticated)");
                         let mut b = TcpStream::connect(&opt.camouflage_addr).await?;
                         b.write_all(&buf).await?;
                         // TODO: throttle somehow to avoid be abused?
-                        tokio::io::copy_bidirectional(&mut io, &mut b).await
+                        copy_bidirectional(&mut io, &mut b).await.map_err(Into::<io::Error>::into).map_err(Into::<anyhow::Error>::into)
                     }
                     ClientHelloInvalid { buf, mut io } => {
                         info!("fallback relay (client protocol unrecognized)");
                         let mut b = TcpStream::connect(&opt.camouflage_addr).await?;
                         b.write_all(&buf).await?;
-                        tokio::io::copy_bidirectional(&mut io, &mut b).await
+                        copy_bidirectional(&mut io, &mut b).await.map_err(Into::<io::Error>::into).map_err(Into::<anyhow::Error>::into)
                     }
                     _ => unreachable!(),
                 }
             };
+            // TODO: fix messing logging and error types
             match fut.await {
                 Ok((tx, rx)) => {
                     debug!(tx, rx, "fallback relay closed");

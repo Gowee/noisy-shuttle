@@ -113,7 +113,9 @@ impl Pool {
                 count -= 1;
             }
             debug!(last_min = count, pending = queue.len(), "preflighting");
-            break;
+            if count>=30{
+                break;
+            }
         }
         warn!("test done flighting");
         Ok(())
