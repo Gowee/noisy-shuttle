@@ -14,7 +14,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use snowy_tunnel::SnowyStream;
-use copy_bidirectional_with_context::copy_bidirectional;
 
 use crate::trojan::{
     self, Cmd, TrojanLikeRequest, TrojanUdpDatagramReceiver, TrojanUdpDatagramSender,
@@ -356,7 +355,7 @@ async fn relay_tcp_with(
             .await
             .context("failed to write request header together with initial inbound data")?;
     }
-    let (tx, rx) = copy_bidirectional(&mut inbound, &mut outbound).await.map_err(Into::<io::Error>::into)?;
+    let (tx, rx) = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await?;
     Ok((tx + initlen as u64, rx))
 }
 
