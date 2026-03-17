@@ -15,15 +15,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [ "env-filter" ] }
 lru = "0.7"
 deadqueue = { version = "0.2", features = ["resizable"] }
-ja3-rustls = { version = "0.0", git = "https://github.com/gowee/ja3-rustls.git" }
 async-trait = "0.1.57"
 rand = "0.8"
 num-traits = "0.2"
 num-derive = "0.3"
 socks5-protocol = { version = "0.3", features = ["sync"] }
 httparse = "1.8"
-copy_bidirectional_with_context = { path = "../copybidi" }
-
 snowy-tunnel = { path = "../tunnel" }
 structopt-flags = "0.3.6"
 

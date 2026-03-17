@@ -2,10 +2,5 @@
 
 members = [
     "tunnel",
-    "shuttle",
-    "copybidi"
+    "shuttle"
 ]
-
-[patch.crates-io]
-rustls = { path = "./rustls-patched/rustls" }
-

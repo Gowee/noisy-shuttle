@@ -1,23 +1,23 @@
 use lru::LruCache;
-use rand::{thread_rng, Rng};
-use rustls::{HandshakeType, ProtocolVersion};
+use rustls::CipherSuite;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
-use tracing::{debug, trace};
+use tracing::debug;
 
 use std::fmt::Debug;
 use std::io;
-use std::mem;
 use std::net::SocketAddr;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::common::{derive_psk, SnowyStream, NOISE_PARAMS, PSKLEN};
 use crate::totp::Totp;
-use crate::utils::{
-    get_client_tls_versions, get_server_tls_version, parse_tls_plain_message, read_tls_message,
-    u16_from_be_slice, TlsMessageExt,
+use crate::tls_msgs::{
+    build_change_cipher_spec_record, build_server_hello_tls13, ClientHelloInjection,
 };
+use crate::utils::{read_tls_message, u16_from_be_slice};
+use blake2::Digest;
 
 /// Server with config to establish snowy tunnels with peer clients
 #[derive(Debug)]
@@ -61,58 +61,53 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
     pub async fn accept(&self, mut inbound: TcpStream) -> Result<SnowyStream, AcceptError> {
         use AcceptError::*;
 
-        let mut responder = snow::Builder::new(NOISE_PARAMS.clone())
-            .psk(0, &self.key)
-            .build_responder()
-            .expect("Valid NOISE params");
         let mut buf = Vec::new();
 
-        // Ref: https://tls12.xargs.org/
-        //      https://github.com/Gowee/rustls-mod/blob/a94a0055e1599d82bd8e212ad2dd19410204d5b7/rustls/src/msgs/message.rs#L88
-        //   CH: record header + handshake header + server version + server random + session id len +
-        //   session id + ..
-
-        // Noise: -> psk, e
-        let mut psk_e = [0u8; 48];
-        let mut timesig = [0u8; 16];
-        match read_tls_message(&mut inbound, &mut buf)
-            .await?
-            .ok()
-            .and_then(|_| parse_tls_plain_message(&buf).ok())
-            .filter(|msg| msg.is_handshake_type(HandshakeType::ClientHello))
-            .and_then(|msg| msg.into_client_hello_payload())
-        {
-            Some(chp) => {
-                chp.random.write_slice(&mut psk_e[..32]); // client random
-                let s: (usize, [u8; 32]) = chp.session_id.into();
-                psk_e[32..].copy_from_slice(&s.1[..16]); // session id
-                timesig.copy_from_slice(&s.1[16..32]);
-
-                let client_tls1_3 = get_client_tls_versions(&chp)
-                    .map(|vers| vers.iter().any(|&ver| ver == ProtocolVersion::TLSv1_3))
-                    .unwrap_or(false);
-                trace!(
-                    "client {} supports TLS 1.3: {}",
-                    inbound.peer_addr().unwrap(),
-                    client_tls1_3
-                );
-            }
+        // Read ClientHello record.
+        match read_tls_message(&mut inbound, &mut buf).await?.ok() {
+            Some(()) => {}
             None => {
                 return Err(ClientHelloInvalid { buf, io: inbound });
             }
         }
-        trace!(
-            "noise ping from {:?}, psk_e {:x?}, timesig: {:x?}",
-            &inbound,
-            psk_e,
-            timesig
-        );
-        let e = psk_e[..32].try_into().unwrap();
-        if !self.totp.verify_current(e, &timesig)
-            || responder.read_message(&psk_e, &mut []).is_err()
-        {
+
+        let injection = match ClientHelloInjection::locate(&buf) {
+            Ok(i) => i,
+            Err(_) => return Err(ClientHelloInvalid { buf, io: inbound }),
+        };
+
+        // Build prologue (zero only injection points).
+        let mut prologue = buf.clone();
+        prologue[injection.x25519_keyshare.clone()].fill(0);
+        prologue[injection.session_id_noise.clone()].fill(0);
+
+        let mut responder = snow::Builder::new(NOISE_PARAMS.clone())
+            .psk(0, &self.key)
+            .prologue(&prologue)
+            .build_responder()
+            .expect("Valid NOISE params");
+
+        // Reconstruct Noise msg1 = e(32) + ct+tag(24).
+        let mut msg1 = [0u8; 56];
+        msg1[0..32].copy_from_slice(&buf[injection.x25519_keyshare.clone()]);
+        msg1[32..56].copy_from_slice(&buf[injection.session_id_noise.clone()]);
+
+        let mut ts_out = [0u8; 8];
+        if responder.read_message(&msg1, &mut ts_out).is_err() {
             return Err(Unauthenticated { buf, io: inbound });
         }
+
+        // Timestamp skew check (±60s).
+        let ts = u64::from_be_bytes(ts_out);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if ts.abs_diff(now) > 60 {
+            return Err(Unauthenticated { buf, io: inbound });
+        }
+
+        let e: [u8; 32] = buf[injection.x25519_keyshare.clone()].try_into().unwrap();
         debug!("authenticated {:?}", &inbound);
         {
             let mut rf = self.replay_filter.lock().unwrap();
@@ -127,75 +122,36 @@ impl<A: ToSocketAddrs + Debug> Server<A> {
             rf.put(e, inbound.peer_addr().unwrap());
         }
 
-        let mut outbound = TcpStream::connect(&self.camouflage_addr).await?;
+        // Build a placeholder ServerHello (random + keyshare zero) to hash.
+        let cipher_suite = CipherSuite::TLS13_AES_128_GCM_SHA256;
+        let placeholder_random = [0u8; 32];
+        let placeholder_keyshare = [0u8; 32];
+        let session_id_full = buf[injection.session_id_full.clone()].to_vec();
+        let sh_placeholder = build_server_hello_tls13(session_id_full.clone(), cipher_suite, placeholder_random, placeholder_keyshare);
 
-        // forward Client Hello in whole to camouflage server
-        outbound.write_all(&buf).await?;
-
-        // read camouflage Server Hello back
-        let shp = match read_tls_message(&mut outbound, &mut buf)
-            .await?
-            .ok()
-            .and_then(|_| parse_tls_plain_message(&buf).ok())
-            .filter(|msg| msg.is_handshake_type(HandshakeType::ServerHello))
-            .and_then(|msg| msg.into_server_hello_payload())
-        {
-            Some(shp) => shp,
-            None => {
-                return Err(ServerHelloInvalid {
-                    buf,
-                    inbound,
-                    outbound,
-                });
-            }
+        let h16 = {
+            let digest = blake2::Blake2s256::digest(&sh_placeholder);
+            let mut out = [0u8; 16];
+            out.copy_from_slice(&digest[..16]);
+            out
         };
-        // forward camouflage server hello back to client
-        inbound.write_all(&buf).await?;
-        match get_server_tls_version(&shp) {
-            Some(ProtocolVersion::TLSv1_3) => {
-                // TLS 1.3: handshake done
-                debug!(
-                    "{} <-> {} negotiated TLS version: 1.3",
-                    inbound.peer_addr().unwrap(),
-                    outbound.peer_addr().unwrap()
-                );
-            }
-            _ => {
-                // TLS 1.2: continue handshake
-                debug!(
-                    "{} <-> {} negotiated TLS version: 1.2 or other",
-                    inbound.peer_addr().unwrap(),
-                    outbound.peer_addr().unwrap()
-                );
-                relay_until_tls12_handshake_finished(&mut inbound, &mut outbound).await?;
-                debug!(
-                    "{} <-> {} full handshake done",
-                    inbound.peer_addr().unwrap(),
-                    outbound.peer_addr().unwrap()
-                );
-            }
-        }
 
-        // handshake done, drop connection to camouflage server
-        mem::drop(outbound);
-
-        // Noise: <- e, ee
-        let mut pong = [0u8; 5 + 48 + 24]; // 0 - 24 random padding
-        let pad_len = thread_rng().gen_range(0..=24);
-        rand::thread_rng().fill(&mut pong[5 + 48..5 + 48 + pad_len]);
-        pong[..5].copy_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x30 + pad_len as u8]);
+        // Noise message2: "<- e, ee" with payload=hash16 => 32 (e) + 16 (ct) + 16 (tag) = 64.
+        let mut msg2 = [0u8; 64];
         let len = responder
-            .write_message(&[], &mut pong[5..])
-            .expect("Noise state valid");
-        debug_assert_eq!(len, 48);
-        trace!(pad_len, "e, ee to {:?}: {:x?}", inbound, &pong[5..5 + 48]);
-        inbound.write_all(&pong[..5 + 48 + pad_len]).await?;
-        // but, is uniform random length of initial messages a characteristic per se?
+            .write_message(&h16, &mut msg2)
+            .map_err(|e| AcceptError::IoError(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+        debug_assert_eq!(len, 64);
+        let server_e: [u8; 32] = msg2[0..32].try_into().unwrap();
+        let server_random: [u8; 32] = msg2[32..64].try_into().unwrap();
+
+        let sh = build_server_hello_tls13(session_id_full, cipher_suite, server_random, server_e);
+        inbound.write_all(&sh).await?;
+        inbound.write_all(&build_change_cipher_spec_record()).await?;
 
         let responder = responder
             .into_transport_mode()
             .expect("Noise handshake done");
-        trace!("noise handshake done with {:?}", inbound);
         Ok(SnowyStream::new(inbound, responder))
     }
 }

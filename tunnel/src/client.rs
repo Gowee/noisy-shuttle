@@ -1,301 +1,153 @@
-use rustls::internal::msgs::enums::ExtensionType;
-use rustls::{
-    ClientConnection as RustlsClientConnection, ContentType as TlsContentType, HandshakeType,
-    ProtocolVersion, ServerName,
-};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tracing::warn;
-use tracing::{debug, trace};
+use tracing::trace;
 
 use std::io;
-use std::mem::{self, MaybeUninit};
-use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::totp::Totp;
-use crate::utils::{parse_tls_plain_message, u16_from_be_slice};
-use crate::FingerprintSpec;
+use crate::utils::read_tls_message;
+use blake2::Digest;
 
-use crate::utils::{
-    get_server_tls_version, read_tls_message, HandshakeStateExt, NoCertificateVerification,
-    TlsMessageExt,
-};
-
-use super::common::{
-    derive_psk, SnowyStream, DEFAULT_ALPN_PROTOCOLS, MAXIMUM_CIPHERTEXT_LENGTH, NOISE_PARAMS,
-    PSKLEN, TLS_RECORD_HEADER_LENGTH,
+use super::common::{derive_psk, SnowyStream, NOISE_PARAMS, PSKLEN};
+use crate::tls_msgs::{
+    build_change_cipher_spec_record, build_chrome133_client_hello, ClientHelloInjection,
+    ServerHelloInjection,
 };
 
 /// Client with config to establish snowy tunnels with a peer server
 #[derive(Debug, Clone)]
 pub struct Client {
     pub key: [u8; PSKLEN],
-    pub server_name: ServerName,
-    pub fingerprint_spec: Arc<FingerprintSpec>,
+    pub server_name: String,
     pub totp: Totp,
-    // pub verify_tls: bool,
 }
 
 impl Client {
-    /// Create a client with a pre-shared key and a server name for camouflage
-    ///
-    /// The server name would be sent out as [Server Name Indication](https://en.wikipedia.org/wiki/Server_Name_Indication).
-    /// Generally, it should match the camouflage server address specified on a tunnel's server-side. .
-    pub fn new(key: impl AsRef<[u8]>, server_name: ServerName) -> Self {
+    /// Create a client with a pre-shared key and a server name for camouflage.
+    pub fn new(key: impl AsRef<[u8]>, server_name: impl AsRef<str>) -> Self {
         let key = key.as_ref();
         Client {
             key: derive_psk(key),
-            server_name,
-            fingerprint_spec: Default::default(),
+            server_name: server_name.as_ref().to_string(),
             totp: Totp::new(key, 60, 2),
         }
     }
 
-    /// Create a client with a pre-shared key, a server name for camouflage and additionally a
-    /// fingerprint specification used to apply to TLS ClientHello
-    pub fn new_with_fingerprint(
-        key: impl AsRef<[u8]>,
-        server_name: ServerName,
-        fingerprint_spec: FingerprintSpec,
-    ) -> Self {
-        let key = key.as_ref();
-        Client {
-            key: derive_psk(key),
-            server_name,
-            fingerprint_spec: Arc::new(fingerprint_spec),
-            totp: Totp::new(key, 60, 2),
-        }
-    }
-
-    /// Handshake with a peer server of the connected `TcpStream`
+    /// Handshake with a peer server of the connected `TcpStream`.
     pub async fn connect(&self, mut stream: TcpStream) -> io::Result<SnowyStream> {
+        // 1) Build Chrome-133 ClientHello template record.
+        let mut ch = build_chrome133_client_hello(&self.server_name);
+
+        // 2) Locate injection points (X25519 keyshare + first 24 bytes of session id).
+        let injection = ClientHelloInjection::locate(&ch)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        // 3) Compute prologue: zero only injection points.
+        let mut prologue = ch.clone();
+        prologue[injection.x25519_keyshare.clone()].fill(0);
+        prologue[injection.session_id_noise.clone()].fill(0);
+
+        // 4) Build Noise initiator with prologue and write first message with timestamp payload.
         let mut initiator = snow::Builder::new(NOISE_PARAMS.clone())
             .psk(0, &self.key)
+            .prologue(&prologue)
             .build_initiator()
             .expect("Noise params valid");
-        // Noise: -> psk, e
-        let psk_e = initiator.writen::<48>().expect("Noise state valid");
-        let random = <[u8; 32]>::try_from(&psk_e[0..32]).unwrap();
-        let mut session_id = [0u8; 32];
-        session_id[..16].copy_from_slice(&psk_e[32..48]);
-        session_id[16..].copy_from_slice(&self.totp.sign_current::<16>(&psk_e[0..32])); // timesig
-        trace!(
-            "noise ping to {:?}, psk_e {:x?}, timesig: {:x?}",
-            &stream,
-            psk_e,
-            &session_id[16..]
-        );
 
-        let chwriter = self
-            .fingerprint_spec
-            .get_client_hello_overwriter(true, true);
-        // TODO: option for verifying camouflage cert
-        let mut tlsconf = rustls::ClientConfig::builder()
-            .with_safe_defaults()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
-            .with_no_client_auth();
-        if let Some(ref ja3) = self.fingerprint_spec.ja3 {
-            // fingerprint_spec.alpn is effective iff alpn is set in ja3
-            if ja3
-                .extensions_as_typed()
-                .any(|ext| ext == ExtensionType::ALProtocolNegotiation)
-            {
-                // It is necessary to add it to conf. Only adding it to allowed_unsolicited_extensions
-                // resulted in TLS client rejection when ALPN is negeotiated.
-                tlsconf.alpn_protocols = self
-                    .fingerprint_spec
-                    .alpn
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| Vec::from(DEFAULT_ALPN_PROTOCOLS.map(Vec::from)));
-            }
-        }
-        let mut tlsconn = rustls::ClientConnection::new_with(
-            Arc::new(tlsconf.clone()),
-            self.server_name.clone(),
-            random.into(),
-            Some(session_id.as_slice().into()),
-            None,
-            None,
-            chwriter,
-        )
-        .expect("TLS config valid");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let ts = now.to_be_bytes(); // u64
 
-        let mut buf: Vec<MaybeUninit<u8>> =
-            Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
-        let mut buf: Vec<u8> = unsafe {
-            buf.set_len(buf.capacity());
-            mem::transmute(buf)
-        };
-        let len = tlsconn.write_tls(&mut io::Cursor::new(&mut buf))?; // Write for Vec is dummy?
-        unsafe { buf.set_len(len) };
-        debug_assert!(!tlsconn.wants_write() & tlsconn.wants_read());
-        stream.write_all(&buf).await?; // forward Client Hello
-
-        // read Server Hello
-        let shp = read_tls_message(&mut stream, &mut buf)
-            .await?
-            .ok()
-            .and_then(|_| parse_tls_plain_message(&buf).ok())
-            .filter(|msg| msg.is_handshake_type(HandshakeType::ServerHello))
-            .and_then(|msg| msg.into_server_hello_payload())
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "Not or invalid Server Hello")
-            })?;
-
-        // server negotiated TLS version
-        match get_server_tls_version(&shp) {
-            Some(ProtocolVersion::TLSv1_3) => {
-                // TLS 1.3: handshake treated as done
-                // In TLS 1.3, all messages after client/server hello are encrypted by the session
-                // key generated by ECDHE. An eavesdropper won't be able to see certificate and
-                // certificate verify (signature of ECDHE public key). So there is no need to copy
-                // handshake procedures any more. Actually, even Server Hello can also be
-                // fabricated locally without be distinguished. Here the fingerprint in ServerHello
-                // is useful, though.
-                // TODO: Cache SH for latter use instead of request camouflage server every time.
-                // TODO: Send mibble box compatibility CCS and more ApplicationData frames, as
-                //   in typical TLS 1.3 handshake.
-            }
-            _ => {
-                // TLS 1.2: conitnue full handshake via rustls
-                // In TLS 1.2, the handshake procedures are basically transparent. That is, an
-                // eavesdropper could verify the unencrypted signature against the camouflage
-                // servers' public key. So the camouflage server is requested every time.
-
-                // feed previously read Server Hello
-                tlsconn.read_tls(&mut io::Cursor::new(&mut buf))?;
-                tls12_handshake(&mut tlsconn, &mut stream, false).await?;
-                // TLS1.2 handshake done
-            }
-        }
-
-        // Noise: <- e, ee
-        let mut pong = Vec::with_capacity(5 + 48 + 24); // 0..24 random padding
-        read_tls_message(&mut stream, &mut pong)
-            .await?
-            .map_err(|_e| {
-                io::Error::new(io::ErrorKind::InvalidData, "First data frame not noise")
-            })?; // TODO: timeout
-        if pong.len() < 5 + 48 {
-            warn!(
-                "Noise handshake {} <-> {} failed. Wrong key or time out of sync?",
-                stream.local_addr().unwrap(),
-                stream.peer_addr().unwrap()
-            );
+        let mut msg1 = [0u8; 56]; // 32 e + 8 ct + 16 tag = 56
+        let len = initiator
+            .write_message(&ts, &mut msg1)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if len != msg1.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Noise handshake failed due to message length shorter than expected",
+                "Noise message1 length mismatch",
             ));
         }
-        let e_ee: [u8; 48] = pong[5..5 + 48].try_into().unwrap(); // 32B pubkey + 16B AEAD tag
+
+        // Inject e into X25519 key share, and ciphertext+tag into SessionID[0..24].
+        ch[injection.x25519_keyshare.clone()].copy_from_slice(&msg1[0..32]);
+        ch[injection.session_id_noise.clone()].copy_from_slice(&msg1[32..56]);
+
         trace!(
-            pad_len = pong.len() - (5 + 48),
-            "e, ee from {:?}: {:x?}",
-            stream,
-            &e_ee
+            "sending templated ClientHello to {:?}, ts={}, msg1={:x?}",
+            &stream,
+            now,
+            &msg1[..]
         );
+        stream.write_all(&ch).await?;
+
+        // 5) Read fabricated ServerHello.
+        let mut buf = Vec::new();
+        read_tls_message(&mut stream, &mut buf)
+            .await?
+            .map_err(|_e| io::Error::new(io::ErrorKind::InvalidData, "Invalid TLS record"))?;
+
+        let (server_e, sh_random_ct, sh_bytes) = parse_fabricated_serverhello(&buf)?;
+
+        // 6) Decrypt hash in ServerRandom via Noise message2: "<- e, ee".
+        let mut msg2 = Vec::with_capacity(64);
+        msg2.extend_from_slice(&server_e);
+        msg2.extend_from_slice(&sh_random_ct);
+        let mut decrypted = [0u8; 16];
         initiator
-            .read_message(&e_ee, &mut [])
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?; // TODO: allow recovery?
+            .read_message(&msg2, &mut decrypted)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        // 7) Verify ServerHello hash (over zeroed SH injection points).
+        let expected = hash_serverhello_zeroed(&sh_bytes)?;
+        if decrypted != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ServerHello hash mismatch",
+            ));
+        }
+
+        // 8) Drop server CCS, then send our CCS and switch to transport mode.
+        let mut ccs = Vec::new();
+        read_tls_message(&mut stream, &mut ccs)
+            .await?
+            .map_err(|_e| io::Error::new(io::ErrorKind::InvalidData, "Missing CCS"))?;
+        stream.write_all(&build_change_cipher_spec_record()).await?;
+
         let noise = initiator
             .into_transport_mode()
-            .expect("Noise handshake done");
-        trace!("noise handshake done with {:?}", stream);
+            .map_err(|_e| io::Error::new(io::ErrorKind::InvalidData, "Noise not ready"))?;
+
         Ok(SnowyStream::new(stream, noise))
     }
 }
 
-async fn tls12_handshake(
-    tlsconn: &mut RustlsClientConnection,
-    stream: &mut TcpStream,
-    stop_after_server_ccs: bool,
-) -> io::Result<()> {
-    let mut buf: Vec<MaybeUninit<u8>> =
-        Vec::with_capacity(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
-    let mut buf: Vec<u8> = unsafe {
-        buf.set_len(buf.capacity());
-        mem::transmute(buf)
-    };
-    let mut seen_ccs = false;
-    loop {
-        match (tlsconn.wants_read(), tlsconn.wants_write()) {
-            (_, true) => {
-                // flow: client -> server
-                // always prefer to write out over reading in, to avoid deadlock-like waiting
-                let len = tlsconn.write_tls(&mut io::Cursor::new(&mut buf)).unwrap();
-                // typically, multiple messages are written by a single call
-                trace!(
-                    first_protocol = u16_from_be_slice(&buf[1..3]),
-                    first_msglen = u16_from_be_slice(&buf[3..5]),
-                    totallen = len,
-                    "tls handshake {} => {}, first type: {:?}",
-                    stream.local_addr().unwrap(),
-                    stream.peer_addr().unwrap(),
-                    TlsContentType::from(buf[0]),
-                );
-                stream.write_all(&buf[..len]).await?;
-            }
-            (true, false) => {
-                // flow: client <- server
-                stream.read_exact(&mut buf[..5]).await?;
-                let len = u16_from_be_slice(&buf[3..5]) as usize;
-                stream.read_exact(&mut buf[5..5 + len]).await?;
-                trace!(
-                    protocol = u16_from_be_slice(&buf[1..3]),
-                    msglen = u16_from_be_slice(&buf[3..5]),
-                    "tls handshake {} <= {}, type: {:?}",
-                    stream.local_addr().unwrap(),
-                    stream.peer_addr().unwrap(),
-                    TlsContentType::from(buf[0]),
-                );
-                // rustls reads at most 4k for once, while it accepts 16k at most if feed multiple times.
-                // ref: https://github.com/rustls/rustls/blob/1164380b2e40a1db8b3909323581bd2647d82b0c/rustls/src/msgs/deframer.rs#L295
-                let mut i = 0;
-                while i < 5 + len {
-                    let n = tlsconn
-                        .read_tls(&mut io::Cursor::new(&mut buf[i..5 + len]))
-                        .unwrap();
-                    assert!(n > 0, "TLS feed zero");
-                    i += n;
-                }
-                tlsconn.process_new_packets().map_err(|e| {
-                    debug!(
-                        "tls state error when handshaking {} <-> {}: {:?}",
-                        stream.local_addr().unwrap(),
-                        stream.peer_addr().unwrap(),
-                        e
-                    );
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("TLS handshake state: {}", e),
-                    )
-                })?;
-                match TlsContentType::from(buf[0]) {
-                    TlsContentType::ChangeCipherSpec => {
-                        seen_ccs = true;
-                        // after server ChangeCipherSpec, the final Handshake Finished message is encrypted
-                        // so it can be used to carry other data
-                        if stop_after_server_ccs {
-                            break;
-                        }
-                    }
-                    _ => {
-                        debug_assert_eq!(buf[0], TlsContentType::Handshake.get_u8());
-                        // by default, handshake is done after the Handshake Finished message
-                        if seen_ccs {
-                            break;
-                        }
-                    }
-                }
-            }
-            (false, false) => break,
-        }
-    }
-    trace!(
-        "tls handshake {} <-> {} done",
-        stream.local_addr().unwrap(),
-        stream.peer_addr().unwrap(),
-    );
-    Ok(())
+fn parse_fabricated_serverhello(buf: &[u8]) -> io::Result<([u8; 32], [u8; 32], Vec<u8>)> {
+    let injection = ServerHelloInjection::locate(buf)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    let mut random = [0u8; 32];
+    random.copy_from_slice(&buf[injection.random.clone()]);
+    let mut e = [0u8; 32];
+    e.copy_from_slice(&buf[injection.x25519_keyshare.clone()]);
+
+    Ok((e, random, buf.to_vec()))
 }
+
+fn hash_serverhello_zeroed(sh_record: &[u8]) -> io::Result<[u8; 16]> {
+    let mut tmp = sh_record.to_vec();
+    let injection = ServerHelloInjection::locate(&tmp)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    tmp[injection.random.clone()].fill(0);
+    tmp[injection.x25519_keyshare.clone()].fill(0);
+
+    let h = blake2::Blake2s256::digest(&tmp);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&h[..16]);
+    Ok(out)
+}
+

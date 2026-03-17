@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use std::time::Duration;
 
@@ -35,10 +35,6 @@ pub async fn run_client(opt: CltOpt) -> Result<()> {
         aht_ema_coeff = PREFLIHGTER_EMA_COEFF
     );
     let client = opt.build_client();
-    if !client.fingerprint_spec.is_empty() {
-        info!("tls fingerprint loaded");
-        debug!(fpspec = ?client.fingerprint_spec);
-    }
 
     match opt.preflight {
         (0, Some(0)) => {

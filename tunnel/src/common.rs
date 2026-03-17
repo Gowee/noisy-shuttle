@@ -1,6 +1,4 @@
 use lazy_static::lazy_static;
-use rustls::internal::msgs::message::MessageError;
-use rustls::internal::msgs::{codec::Reader as RustlsCodecReader, message::OpaqueMessage};
 use snow::params::NoiseParams;
 use snow::TransportState;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -59,8 +57,8 @@ impl SnowyStream {
     pub fn new(io: TcpStream, noise: TransportState) -> Self {
         // TODO: safe
         let mut pending_read_buffer = vec![];
-        pending_read_buffer.reserve_exact(OpaqueMessage::MAX_WIRE_SIZE);
-        unsafe { pending_read_buffer.set_len(OpaqueMessage::MAX_WIRE_SIZE) };
+        pending_read_buffer.reserve_exact(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH);
+        unsafe { pending_read_buffer.set_len(TLS_RECORD_HEADER_LENGTH + MAXIMUM_CIPHERTEXT_LENGTH) };
 
         SnowyStream {
             socket: io,
@@ -188,75 +186,72 @@ impl AsyncRead for SnowyStream {
                 debug_assert_eq!(this.read_offset, 0);
                 debug_assert_eq!(this.read_buffer.len(), 0);
 
-                // then, try to pop a ready TLS frame
-                // trace!(buflen=this.pending_read_filled, "Extracting a TLS frame from buffer");
-                let mut rd =
-                    RustlsCodecReader::init(&this.pending_read_buffer[..this.pending_read_filled]);
-                match OpaqueMessage::read(&mut rd) {
-                    Ok(message) => {
-                        // TODO: handle close notify
-                        let n = rd.used();
-                        debug_assert!(n <= this.pending_read_filled);
-                        this.pending_read_buffer
-                            .copy_within(n..this.pending_read_filled, 0);
-                        this.pending_read_filled -= n;
-                        if message.payload.0.is_empty() {
-                            continue;
-                        }
-                        debug_assert_eq!(this.read_offset, 0);
-                        this.read_buffer
-                            .reserve_exact(MAXIMUM_PLAINTEXT_LENGTH - this.read_buffer.capacity());
-                        unsafe { this.read_buffer.set_len(MAXIMUM_PLAINTEXT_LENGTH) };
-                        // ensure message payload no empty, o.w. mysterious Decrypt error may be resulted
-                        let len = this
-                            .noise
-                            .read_message(&message.payload.0, &mut this.read_buffer)
-                            .map_err(|e| {
-                                debug!(
-                                    "Noise read error on {:?}, message: {:#?}",
-                                    this.socket, message
-                                );
-                                io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!("Noise failed to read message: {}", e),
-                                )
-                            })?;
-                        this.read_buffer.truncate(len);
-                        trace!(
-                            pldlen = message.payload.0.len(),
-                            plainlen = len,
-                            "tls message ready for {:?}, type: {:?}, version: {:?}",
-                            this.socket,
-                            message.typ,
-                            message.version,
-                        );
-                        if this.read_buffer.starts_with(REUSE_MARK) {
-                            this.peer_signalled_reuse = true;
-                            info!("peer_signalled_reuse packetlen={:?}", this.read_buffer.len());
-                            if this.read_buffer.len() == REUSE_MARK.len() {
-                                this.read_offset = 0;
-                                this.read_buffer.clear();
-                            }
-                            else {
-                                this.read_offset = REUSE_MARK.len();
-                            }
-                            break 'read_more;
-                        }
+                // then, try to pop a ready TLS record (we only care about payload bytes)
+                if this.pending_read_filled < TLS_RECORD_HEADER_LENGTH {
+                    break 'read_ready;
+                }
+                let hdr = &this.pending_read_buffer[..TLS_RECORD_HEADER_LENGTH];
+                let record_type = hdr[0];
+                let len = u16::from_be_bytes([hdr[3], hdr[4]]) as usize;
+                if len == 0 || len >= MAXIMUM_CIPHERTEXT_LENGTH {
+                    this.state.shutdown_read();
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Invalid TLS record length",
+                    )));
+                }
+                if this.pending_read_filled < TLS_RECORD_HEADER_LENGTH + len {
+                    break 'read_ready;
+                }
+                let payload_start = TLS_RECORD_HEADER_LENGTH;
+                let payload_end = TLS_RECORD_HEADER_LENGTH + len;
+                let record_payload = this.pending_read_buffer[payload_start..payload_end].to_vec();
+
+                // shift remaining bytes down
+                this.pending_read_buffer
+                    .copy_within(payload_end..this.pending_read_filled, 0);
+                this.pending_read_filled -= payload_end;
+
+                if record_payload.is_empty() {
+                    continue;
+                }
+
+                // Skip non-application-data records (e.g. CCS during handshake mimicry).
+                // We only wrap Noise transport frames in ApplicationData (0x17).
+                if record_type != 0x17 {
+                    trace!(
+                        record_type,
+                        record_len = len,
+                        "skipping non-appdata tls record"
+                    );
+                    continue;
+                }
+                debug_assert_eq!(this.read_offset, 0);
+                this.read_buffer
+                    .reserve_exact(MAXIMUM_PLAINTEXT_LENGTH - this.read_buffer.capacity());
+                unsafe { this.read_buffer.set_len(MAXIMUM_PLAINTEXT_LENGTH) };
+                let plain_len = this
+                    .noise
+                    .read_message(&record_payload, &mut this.read_buffer)
+                    .map_err(|e| {
+                    debug!("Noise read error on {:?}: {}", this.socket, e);
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Noise failed to read message: {}", e),
+                    )
+                })?;
+                this.read_buffer.truncate(plain_len);
+
+                if this.read_buffer.starts_with(REUSE_MARK) {
+                    this.peer_signalled_reuse = true;
+                    info!("peer_signalled_reuse packetlen={:?}", this.read_buffer.len());
+                    if this.read_buffer.len() == REUSE_MARK.len() {
+                        this.read_offset = 0;
+                        this.read_buffer.clear();
+                    } else {
+                        this.read_offset = REUSE_MARK.len();
                     }
-                    Err(MessageError::TooShortForHeader) | Err(MessageError::TooShortForLength) => {
-                        // no ready tls frame, proceed to read the inner socket
-                        // trace!("No TLS frame ready");
-                        break 'read_ready;
-                    }
-                    Err(err) => {
-                        // TODO: properly handle and alert?
-                        debug!("Invalid TLS frame on {:?}: {:?}", this.socket, err);
-                        this.state.shutdown_read();
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Invalid TLS frame",
-                        )));
-                    }
+                    break 'read_more;
                 }
 
                 // if let Some(message) = this.tls_deframer.pop() {
@@ -410,7 +405,7 @@ impl AsyncWrite for SnowyStream {
         //   such way, write might be delayed when it should have been possible to make progress.
         //   ref: https://github.com/tokio-rs/tokio/blob/42d5a9fcd4cf87fb0dd96a1850bdd2e9345a84b9/tokio/src/io/util/copy.rs#L51
         //        https://github.com/tokio-rs/tokio/pull/4001
-        let mut this = self.get_mut();
+        let this = self.get_mut();
         let mut offset = 0;
 
         loop {
@@ -495,7 +490,7 @@ impl AsyncWrite for SnowyStream {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut this = self.get_mut();
+        let this = self.get_mut();
         while this.write_offset < this.write_buffer.len() {
             // should we try to poll_write the underlying more than once at all?
             match Pin::new(&mut this.socket).poll_write(cx, &this.write_buffer[this.write_offset..])

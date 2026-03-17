@@ -8,7 +8,7 @@ version = "0.1.0"
 [dependencies]
 hex-literal = "0.3"
 snow = "0.9"
-rustls = { version = "*", features = ["dangerous_configuration"] }
+rustls = { version = "0.23" }
 tokio = { version = "1.43", features = ["full"] }
 lazy_static = "1.4"
 futures = "0.3"
@@ -16,6 +16,7 @@ rand = "0.8"
 blake2 = "0.10"
 tracing = "0.1"
 lru = "0.7"
-ja3-rustls = { version = "0.0", git = "https://github.com/gowee/ja3-rustls.git", features = ["rand"] }
-itertools = "0.10"
+tls-parser = "0.12"
+
+
 
